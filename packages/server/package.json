@@ -1,0 +1,19 @@
+{
+  "name": "@not-jira/server",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "prebuild": "npm run build -w @not-jira/core",
+    "build": "tsc -p tsconfig.json",
+    "precheck": "npm run build -w @not-jira/core",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.6",
+    "@not-jira/core": "0.1.0",
+    "hono": "^4.10.5"
+  }
+}

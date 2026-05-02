@@ -1,0 +1,29 @@
+{
+  "name": "not-jira-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "not-jira": "packages/cli/dist/index.js"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "check": "npm run check --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "dev:web": "npm run dev -w @not-jira/web",
+    "dev:server": "npm run dev -w @not-jira/server",
+    "not-jira": "npm run dev -w @not-jira/cli --"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.10.1",
+    "@vitejs/plugin-react": "^5.1.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.4",
+    "vitest": "^4.0.13"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@not-jira/core",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.6",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {}
+}

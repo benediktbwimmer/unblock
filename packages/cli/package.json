@@ -1,0 +1,19 @@
+{
+  "name": "@not-jira/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "not-jira": "dist/index.js"
+  },
+  "scripts": {
+    "prebuild": "npm run build -w @not-jira/core",
+    "build": "tsc -p tsconfig.json",
+    "precheck": "npm run build -w @not-jira/core",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@not-jira/core": "0.1.0",
+    "commander": "^14.0.2"
+  }
+}
