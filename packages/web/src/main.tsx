@@ -345,9 +345,10 @@ function App() {
   const activeSelectedIds = useMemo(() => selectedIds.length > 0 ? selectedIds : selectedTask ? [selectedTask.id] : [], [selectedIds, selectedTask]);
   const activeSelectedIdSet = useMemo(() => new Set(activeSelectedIds), [activeSelectedIds]);
   const selectedTasks = useMemo(() => activeSelectedIds.map((id) => tasks.find((task) => task.id === id)).filter((task): task is TaskView => Boolean(task)), [activeSelectedIds, tasks]);
+  const detailTask = selectedIds.length === 1 ? selectedTasks[0] ?? selectedTask : selectedTask;
   const activeProjects = useMemo(() => projects.filter((project) => !project.archivedAt), [projects]);
   const selectedProject = useMemo(() => projects.find((project) => project.id === uiState.projectId) ?? null, [projects, uiState.projectId]);
-  const commentsFocusNonce = selectedTask && commentsFocusTarget?.taskId === selectedTask.id ? commentsFocusTarget.nonce : 0;
+  const commentsFocusNonce = detailTask && commentsFocusTarget?.taskId === detailTask.id ? commentsFocusTarget.nonce : 0;
 
   const updateUiState = useCallback((update: Partial<UiState> | ((current: UiState) => UiState)) => {
     setUiState((current) => typeof update === "function" ? update(current) : { ...current, ...update });
@@ -368,18 +369,18 @@ function App() {
   const identityReady = Boolean(appConfig.identity.machine.trim() && appConfig.identity.actor.trim());
 
   useEffect(() => {
-    if (!selectedTask) {
+    if (!detailTask) {
       setExplanation(null);
       setComments([]);
       return;
     }
-    fetchJson<Explanation>(withProject(`/api/tasks/${selectedTask.id}/explain`, uiState.projectId)).then(setExplanation).catch((reason) => setError(String(reason)));
-    fetchJson<CommentRecord[]>(withProject(`/api/tasks/${selectedTask.id}/comments?limit=50`, uiState.projectId)).then(setComments).catch((reason) => setError(String(reason)));
-  }, [selectedTask?.id, uiState.projectId, dataVersion]);
+    fetchJson<Explanation>(withProject(`/api/tasks/${detailTask.id}/explain`, uiState.projectId)).then(setExplanation).catch((reason) => setError(String(reason)));
+    fetchJson<CommentRecord[]>(withProject(`/api/tasks/${detailTask.id}/comments?limit=50`, uiState.projectId)).then(setComments).catch((reason) => setError(String(reason)));
+  }, [detailTask?.id, uiState.projectId, dataVersion]);
 
   useEffect(() => {
     setCommentDraft("");
-  }, [selectedTask?.id]);
+  }, [detailTask?.id]);
 
   useEffect(() => {
     if (projects.length === 0) {
@@ -582,15 +583,17 @@ function App() {
       toggleDependencyCandidate(taskId);
       return;
     }
-    if (event.shiftKey && selectionAnchorRef.current) {
-      const range = getSelectionRange(visibleTaskIds, selectionAnchorRef.current, taskId);
+    const selectionAnchor = selectionAnchorRef.current ?? selectedTask?.id ?? null;
+    if (event.shiftKey && selectionAnchor) {
+      const range = getSelectionRange(visibleTaskIds, selectionAnchor, taskId);
       setSelectedIds(range);
       updateUiState({ selectedId: taskId });
       return;
     }
     if (event.metaKey || event.ctrlKey) {
       setSelectedIds((current) => {
-        const next = current.includes(taskId) ? current.filter((id) => id !== taskId) : [...current, taskId];
+        const base = current.length > 0 ? current : selectedTask ? [selectedTask.id] : [];
+        const next = base.includes(taskId) ? base.filter((id) => id !== taskId) : [...base, taskId];
         return next.length > 0 ? next : [taskId];
       });
       selectionAnchorRef.current = taskId;
@@ -1153,13 +1156,13 @@ function App() {
                 onTransition={(action) => void bulkTransition(action)}
                 onEditDependencies={() => void startDependencyMode(activeSelectedIds)}
                 onClear={() => {
-                  const fallbackId = selectedTask?.id ?? selectedTasks[0]?.id ?? null;
+                  const fallbackId = selectedTasks[0]?.id ?? selectedTask?.id ?? null;
                   setSelectedIds(fallbackId ? [fallbackId] : []);
                 }}
               />
             ) : (
               <TaskDetails
-                task={selectedTask}
+                task={detailTask}
                 explanation={explanation}
                 comments={comments}
                 commentDraft={commentDraft}
@@ -1603,7 +1606,8 @@ function TaskNode({
   const previewChanged = dependencyPreview.status !== task.computedStatus || dependencyPreview.unfinishedDependenciesCount !== task.unfinishedDependenciesCount;
   const rowClassName = [
     "task-row",
-    selectedIds.has(task.id) || selectedId === task.id ? "selected" : "",
+    selectedIds.has(task.id) ? "selected" : "",
+    selectedId === task.id ? "focused" : "",
     dependencyCandidate ? "dependency-candidate" : "",
     dependencyCandidate?.selected ? "dependency-selected" : "",
     dependencyCandidate?.disabled ? "dependency-disabled" : ""
@@ -2679,11 +2683,12 @@ function registerInstructionCompletions(monaco: any, projectId: string, grammar:
 
       if (context.kind === "value") {
         const values = await fetchInstructionValueSuggestions(projectId, context.field, context.prefix || token, 50);
-        suggestions.push(...values.map((item) => ({
+        suggestions.push(...values.map((item, index) => ({
           label: item.label,
           kind: monaco.languages.CompletionItemKind.Value,
           detail: `${item.detail}${item.count > 0 ? ` / ${item.count}` : ""}`,
           insertText: isMatcherTimeField(context.field) ? item.value : formatMatcherValue(item.value),
+          sortText: completionSortText(index),
           range
         })));
       } else if (context.kind === "operator") {
@@ -2691,16 +2696,17 @@ function registerInstructionCompletions(monaco: any, projectId: string, grammar:
         suggestions.push(...operators.map((operator) => ({
           label: operator,
           kind: monaco.languages.CompletionItemKind.Operator,
-          insertText: operator === "in" ? "in ()" : operator,
+          insertText: operator === "in" ? "in ()" : operator === "not in" ? "not in ()" : operator,
           range
         })));
       } else if (context.kind === "task") {
         const values = await fetchInstructionValueSuggestions(projectId, "id", context.prefix || token, 50);
-        suggestions.push(...values.map((item) => ({
+        suggestions.push(...values.map((item, index) => ({
           label: item.label,
           kind: monaco.languages.CompletionItemKind.Reference,
           detail: item.detail,
           insertText: formatMatcherValue(item.value),
+          sortText: completionSortText(index),
           range
         })));
         suggestions.push(...grammar.comparisonOperators.map((operator) => ({
@@ -2731,6 +2737,10 @@ function registerInstructionCompletions(monaco: any, projectId: string, grammar:
   });
 }
 
+function completionSortText(index: number): string {
+  return String(index).padStart(6, "0");
+}
+
 function getInstructionCompletionContext(line: string, grammar: InstructionGrammarRecord): { kind: "root" } | { kind: "operator"; field: string } | { kind: "task"; prefix: string } | { kind: "value"; field: string; prefix: string } {
   const sortedFields = [...grammar.fields].sort((left, right) => right.length - left.length);
   for (const field of sortedFields) {
@@ -2743,7 +2753,14 @@ function getInstructionCompletionContext(line: string, grammar: InstructionGramm
     if (membership) {
       return { kind: "value", field, prefix: currentMatcherToken(line) };
     }
+    const negativeMembership = line.match(new RegExp(`(?:^|[\\s(])${fieldRegex}\\s+not\\s+in\\s*\\([^)]*$`, "i"));
+    if (negativeMembership) {
+      return { kind: "value", field, prefix: currentMatcherToken(line) };
+    }
     if (line.match(new RegExp(`(?:^|[\\s(])${fieldRegex}\\s*$`, "i"))) {
+      return { kind: "operator", field };
+    }
+    if (line.match(new RegExp(`(?:^|[\\s(])${fieldRegex}\\s+not\\s*$`, "i"))) {
       return { kind: "operator", field };
     }
   }

@@ -20,7 +20,7 @@ type QueryNode =
   | HierarchyPredicate;
 
 const COMPARE_OPERATORS = ["=", "!=", ">", ">=", "<", "<="] as const;
-const FIELD_OPERATORS = [...COMPARE_OPERATORS, "in"] as const;
+const FIELD_OPERATORS = [...COMPARE_OPERATORS, "in", "not in"] as const;
 const BOOLEAN_OPERATORS = ["and", "or", "not"] as const;
 const SIMPLE_FIELDS = ["id", "tag", "assigned", "machine", "actor", "status", "lifecycle", "parent", "priority", "comments"] as const;
 const TIME_FIELDS = ["created", "updated", "started", "finished", "archived"] as const;
@@ -64,7 +64,7 @@ export interface InstructionQueryGrammar {
 interface FieldPredicate {
   type: "field";
   field: FieldName;
-  op: CompareOp | "in";
+  op: CompareOp | "in" | "not in";
   values: string[];
 }
 
@@ -150,8 +150,8 @@ export function instructionQueryGrammar(): InstructionQueryGrammar {
       },
       {
         name: "Field membership",
-        forms: ["FIELD in (VALUE, VALUE, ...)"],
-        description: "Match when any value for the field equals one of the listed values."
+        forms: ["FIELD in (VALUE, VALUE, ...)", "FIELD not in (VALUE, VALUE, ...)"],
+        description: "Match when any value for the field is, or is not, one of the listed values."
       },
       {
         name: "Time comparison",
@@ -343,7 +343,7 @@ class Parser {
       return this.parseTimeField(field);
     }
     const op = this.parseOperator();
-    if (op === "in") {
+    if (op === "in" || op === "not in") {
       this.expect("lparen");
       const values = [this.parseValue()];
       while (this.match("comma")) {
@@ -365,7 +365,7 @@ class Parser {
       return { type: "time", field, op: "is empty" };
     }
     const op = this.parseOperator();
-    if (op === "in") {
+    if (op === "in" || op === "not in") {
       this.fail("Time fields do not support in.");
     }
     return { type: "time", field, op, value: this.parseTimeExpression() };
@@ -397,7 +397,8 @@ class Parser {
     this.fail(`Unknown field '${value}'.`);
   }
 
-  private parseOperator(): CompareOp | "in" {
+  private parseOperator(): CompareOp | "in" | "not in" {
+    if (this.matchWords("not", "in")) return "not in";
     if (this.matchWord("in")) return "in";
     const token = this.expect("op").value;
     if (COMPARE_OPERATORS.includes(token as CompareOp)) {
@@ -551,9 +552,12 @@ function evaluate(node: QueryNode, context: EvalContext): EvalResult {
 
 function evaluateField(predicate: FieldPredicate, task: TaskView): EvalResult {
   const values = fieldValues(predicate.field, task);
+  const inSet = values.some((value) => predicate.values.some((expected) => equalValue(value, expected, predicate.field)));
   const matched = predicate.op === "in"
-    ? values.some((value) => predicate.values.some((expected) => equalValue(value, expected, predicate.field)))
-    : compareAny(values, predicate.op, predicate.values[0] ?? "", predicate.field);
+    ? inSet
+    : predicate.op === "not in"
+      ? !inSet
+      : compareAny(values, predicate.op, predicate.values[0] ?? "", predicate.field);
   return matched ? { matched: true, reasons: [`${predicate.field} ${predicate.op} ${predicate.values.join(", ")}`] } : { matched: false, reasons: [] };
 }
 

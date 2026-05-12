@@ -315,6 +315,46 @@ describe("unblock core services", () => {
     expect(assignedSuggestions.map((suggestion) => suggestion.value)).toEqual(["test-machine:codex-a"]);
   });
 
+  it("orders matcher task id suggestions by hierarchy depth and supports acronym prefixes", async () => {
+    const store = createMemoryStore();
+    const services = createServices(store, { machine: "test-machine", actor: "test-actor" });
+
+    await services.tasks.add({ id: "P-IMPLEMENTATION", title: "Implementation root" });
+    await services.tasks.add({ id: "P-INTEGRATION", title: "Integration root" });
+    await services.tasks.add({ id: "P-IMPLEMENTATION-API", parentTaskId: "P-IMPLEMENTATION", title: "API child" });
+    await services.tasks.add({ id: "P-IMPLEMENTATION-API-TESTS", parentTaskId: "P-IMPLEMENTATION-API", title: "API tests" });
+
+    const suggestions = await services.instructions.suggest("id", { prefix: "P-I", limit: 10 });
+    const values = suggestions.map((suggestion) => suggestion.value);
+
+    expect(values).toContain("P-IMPLEMENTATION");
+    expect(values.indexOf("P-IMPLEMENTATION")).toBeLessThan(values.indexOf("P-IMPLEMENTATION-API"));
+    expect(values.indexOf("P-INTEGRATION")).toBeLessThan(values.indexOf("P-IMPLEMENTATION-API"));
+    expect(values.indexOf("P-IMPLEMENTATION-API")).toBeLessThan(values.indexOf("P-IMPLEMENTATION-API-TESTS"));
+  });
+
+  it("suggests archived status and supports not in membership predicates", async () => {
+    const store = createMemoryStore();
+    const services = createServices(store, { machine: "test-machine", actor: "test-actor" });
+
+    await services.tasks.add({ id: "READY", title: "Ready task" });
+    await services.tasks.add({ id: "DONE", title: "Done task" });
+    await services.tasks.add({ id: "OLD", title: "Archived task" });
+    await services.tasks.finish("DONE");
+    await services.tasks.archive("OLD");
+
+    const statusSuggestions = await services.instructions.suggest("status", { prefix: "a", limit: 10 });
+    expect(statusSuggestions.map((suggestion) => suggestion.value)).toContain("archived");
+
+    const matches = await services.query.list({
+      where: "status not in (finished, archived)",
+      includeFinished: true,
+      includeArchived: true,
+      sort: "id"
+    });
+    expect(matches.map((task) => task.id)).toEqual(["READY"]);
+  });
+
   it("round-trips instructions through JSON import and export", async () => {
     const store = createMemoryStore();
     const services = createServices(store, { machine: "test-machine", actor: "test-actor" });

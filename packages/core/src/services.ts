@@ -881,25 +881,30 @@ export class InstructionService {
     const prefix = input.prefix?.trim().toLowerCase() ?? "";
     const tasks = await this.query.list({ includeFinished: true });
     const counts = new Map<string, InstructionFieldValueSuggestion>();
-    const add = (valueInput: string | null | undefined, detail: string, count = 1) => {
+    const ranks = new Map<string, number>();
+    const taskSuggestionRank = new Map([...tasks].sort((a, b) => a.hierarchyDepth - b.hierarchyDepth || a.id.localeCompare(b.id)).map((task, index) => [task.id, index]));
+    const add = (valueInput: string | null | undefined, detail: string, count = 1, rank?: number) => {
       const value = valueInput?.trim();
       if (!value) {
         return;
       }
-      if (prefix && !value.toLowerCase().startsWith(prefix)) {
+      if (prefix && !matchesSuggestionPrefix(value, prefix)) {
         return;
       }
-      const key = `${field}\u0000${value.toLowerCase()}`;
+      const key = suggestionKey(field, value);
       const existing = counts.get(key);
       if (existing) {
         existing.count += count;
       } else {
         counts.set(key, { field, value, label: value, detail, count });
       }
+      if (rank !== undefined) {
+        ranks.set(key, Math.min(ranks.get(key) ?? Number.MAX_SAFE_INTEGER, rank));
+      }
     };
 
     if (field === "status") {
-      for (const status of ["ready", "blocked", "started", "finished"]) add(status, "computed status", 0);
+      for (const status of ["ready", "blocked", "started", "finished", "archived"]) add(status, "computed status", 0);
     } else if (field === "lifecycle") {
       for (const lifecycle of ["open", "started", "finished"]) add(lifecycle, "lifecycle", 0);
     } else if (field === "priority") {
@@ -919,7 +924,7 @@ export class InstructionService {
     }
 
     for (const task of tasks) {
-      if (field === "id") add(task.id, "task id");
+      if (field === "id") add(task.id, `task id / depth ${task.hierarchyDepth}`, 1, taskSuggestionRank.get(task.id));
       if (field === "id prefix") {
         for (const prefixValue of idPrefixes(task.id)) add(prefixValue, "task id prefix");
       }
@@ -940,7 +945,14 @@ export class InstructionService {
     }
 
     return [...counts.values()]
-      .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value))
+      .sort((a, b) => {
+        if (field === "id") {
+          return (ranks.get(suggestionKey(field, a.value)) ?? Number.MAX_SAFE_INTEGER)
+            - (ranks.get(suggestionKey(field, b.value)) ?? Number.MAX_SAFE_INTEGER)
+            || a.value.localeCompare(b.value);
+        }
+        return b.count - a.count || a.value.localeCompare(b.value);
+      })
       .slice(0, limit);
   }
 }
@@ -1895,6 +1907,39 @@ function normalizeSuggestionLimit(input: number): number {
     validation("Suggestion limit must be a positive integer.", { limit: input });
   }
   return Math.min(input, 500);
+}
+
+function suggestionKey(field: string, value: string): string {
+  return `${field}\u0000${value.toLowerCase()}`;
+}
+
+function matchesSuggestionPrefix(value: string, prefix: string): boolean {
+  const valueLower = value.toLowerCase();
+  const prefixLower = prefix.toLowerCase();
+  if (valueLower.startsWith(prefixLower)) {
+    return true;
+  }
+  const compactValue = compactSuggestionToken(valueLower);
+  const compactPrefix = compactSuggestionToken(prefixLower);
+  if (!compactPrefix) {
+    return true;
+  }
+  if (compactValue.startsWith(compactPrefix)) {
+    return true;
+  }
+  const abbreviation = valueLower.split(/[^a-z0-9]+/).filter(Boolean).map((part) => part[0]).join("");
+  if (abbreviation.startsWith(compactPrefix)) {
+    return true;
+  }
+  const valueParts = valueLower.split(/[^a-z0-9]+/).filter(Boolean);
+  const prefixParts = prefixLower.split(/[^a-z0-9]+/).filter(Boolean);
+  return prefixParts.length > 1
+    && prefixParts.length <= valueParts.length
+    && prefixParts.every((part, index) => valueParts[index]?.startsWith(part));
+}
+
+function compactSuggestionToken(value: string): string {
+  return value.replace(/[^a-z0-9]+/g, "");
 }
 
 function normalizeQueryLimit(input: number): number {
