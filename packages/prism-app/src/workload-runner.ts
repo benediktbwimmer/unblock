@@ -6,13 +6,14 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Readable } from "node:stream";
 import { createServices, type AppStore } from "@unblock/core";
-import { createPrismStore, type PrismStore } from "./store.js";
+import { createPrismStore, prismShardIdForUnblockProject, type PrismStore } from "./store.js";
 
 interface RunnerOptions {
   workloadId: string;
   unblockProjectId: string;
+  tenantId: string;
   prismProjectId: string;
-  shardId: string;
+  shardId: string | undefined;
   actorId: string;
   machine: string;
   endpoint: string;
@@ -26,6 +27,7 @@ interface RunnerOptions {
   activate: boolean;
   keepPrism: boolean;
   tasks: number;
+  projects: number;
   dependencyFanout: number;
   tags: number;
   tagFanout: number;
@@ -45,6 +47,15 @@ interface PhaseMetric {
   count?: number;
 }
 
+interface WorkloadTotals {
+  tasksVisible: number;
+  dependenciesVisible: number;
+  taskTagsVisible: number;
+  instructionsVisible: number;
+  matcherMatches: number;
+  instructionMatches: number;
+}
+
 interface RunnerReport {
   ok: boolean;
   workloadId: string;
@@ -53,6 +64,7 @@ interface RunnerReport {
   runtimeBackend: "runtime-v2";
   scale: {
     tasks: number;
+    projects: number;
     dependencyFanout: number;
     tags: number;
     tagFanout: number;
@@ -65,13 +77,23 @@ interface RunnerReport {
     elapsedMs: number;
     workloadElapsedMs: number;
     wallElapsedMs: number;
-    tasksVisible: number;
-    dependenciesVisible: number;
-    taskTagsVisible: number;
-    instructionsVisible: number;
-    matcherMatches: number;
-    instructionMatches: number;
+  } & WorkloadTotals;
+  throughput: {
+    tasksPerSecond: number;
+    dependenciesPerSecond: number;
+    taskTagsPerSecond: number;
+    projectsPerSecond: number;
   };
+  projects?: ProjectReport[];
+}
+
+interface ProjectReport {
+  workloadId: string;
+  unblockProjectId: string;
+  shardId: string;
+  phases: PhaseMetric[];
+  totals: {
+  } & WorkloadTotals;
 }
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -81,6 +103,7 @@ const DEFAULT_PRISM_REPO = resolve(PACKAGE_ROOT, "../../../prism-new2");
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   if (options.tasks < 2) throw new Error("--tasks must be at least 2");
+  if (options.projects < 1) throw new Error("--projects must be at least 1");
   if (options.tags < 1) throw new Error("--tags must be at least 1");
   if (options.instructions < 1) throw new Error("--instructions must be at least 1");
   const generatedRuntimeSchema = await runtimeSchemaFromGeneratedSql(options.generatedDir);
@@ -89,7 +112,6 @@ async function main(): Promise<void> {
   const startedAt = performance.now();
   let workloadStartedAt = startedAt;
   let prism: PrismProcess | null = null;
-  let store: PrismStore | null = null;
 
   try {
     if (options.migrate) {
@@ -131,23 +153,71 @@ async function main(): Promise<void> {
     }
     workloadStartedAt = performance.now();
 
-    store = createPrismStore({
+    const projectStartedAt = performance.now();
+    const projectReports = await Promise.all(
+      Array.from({ length: options.projects }, (_, index) => runProjectWorkload(options, index)),
+    );
+    const workloadElapsedMs = Math.round(performance.now() - projectStartedAt);
+    phases.push(...aggregateProjectPhases(projectReports));
+    const totals = aggregateProjectTotals(projectReports);
+
+    const report: RunnerReport = {
+      ok: true,
+      workloadId: options.workloadId,
       endpoint: options.endpoint,
-      projectId: options.prismProjectId,
-      shardId: options.shardId,
-      actorId: options.actorId,
-    });
+      schema: options.schema,
+      runtimeBackend: "runtime-v2",
+      scale: {
+        tasks: options.tasks,
+        projects: options.projects,
+        dependencyFanout: options.dependencyFanout,
+        tags: options.tags,
+        tagFanout: options.tagFanout,
+        instructions: options.instructions,
+        queries: options.queries,
+        concurrency: options.concurrency,
+      },
+      phases,
+      totals: {
+        elapsedMs: Math.round(performance.now() - workloadStartedAt),
+        workloadElapsedMs,
+        wallElapsedMs: Math.round(performance.now() - startedAt),
+        ...totals,
+      },
+      throughput: throughput(totals, options.projects, workloadElapsedMs),
+      projects: projectReports,
+    };
+    printReport(report, options);
+  } finally {
+    if (prism && !options.keepPrism) {
+      await stopProcess(prism);
+    }
+  }
+}
+
+async function runProjectWorkload(options: RunnerOptions, projectIndex: number): Promise<ProjectReport> {
+  const projectOptions = optionsForProject(options, projectIndex);
+  const phases: PhaseMetric[] = [];
+  const store = createPrismStore({
+    endpoint: options.endpoint,
+    projectId: options.prismProjectId,
+    tenantId: options.tenantId,
+    unblockProjectId: projectOptions.unblockProjectId,
+    ...(projectOptions.shardId ? { shardId: projectOptions.shardId } : {}),
+    actorId: options.actorId,
+  });
+  try {
     const services = createServices(store, {
-      projectId: options.unblockProjectId,
+      projectId: projectOptions.unblockProjectId,
       machine: options.machine,
       actor: options.actorId,
     });
-    const workload = buildWorkload(options);
+    const workload = buildWorkload(projectOptions);
 
     phases.push(await phase("unblock.project.create", async () => {
       await services.projects.add({
-        id: options.unblockProjectId,
-        name: `Prism workload ${options.workloadId}`,
+        id: projectOptions.unblockProjectId,
+        name: `Prism workload ${projectOptions.workloadId}`,
       });
     }, 1));
 
@@ -160,8 +230,8 @@ async function main(): Promise<void> {
           sortOrder: index,
         });
       });
-      await waitFor("tags visible", options, async () =>
-        (await store!.tags.list(options.unblockProjectId)).length >= options.tags
+      await waitFor(`tags visible for ${projectOptions.unblockProjectId}`, options, async () =>
+        (await store.tags.list(projectOptions.unblockProjectId)).length >= options.tags
       );
     }, workload.tags.length));
 
@@ -176,15 +246,15 @@ async function main(): Promise<void> {
           lifecycle: task.lifecycle,
         })));
       });
-      await waitFor("tasks visible", options, async () =>
-        (await store!.tasks.list(options.unblockProjectId)).length >= options.tasks
+      await waitFor(`tasks visible for ${projectOptions.unblockProjectId}`, options, async () =>
+        (await store.tasks.list(projectOptions.unblockProjectId)).length >= options.tasks
       );
     }, workload.tasks.length));
 
     phases.push(await phase("unblock.dependencies.create", async () => {
       await services.dependencies.addMany(workload.dependencies);
-      await waitFor("dependencies visible", options, async () =>
-        (await store!.dependencies.list(options.unblockProjectId)).length >= workload.dependencies.length
+      await waitFor(`dependencies visible for ${projectOptions.unblockProjectId}`, options, async () =>
+        (await store.dependencies.list(projectOptions.unblockProjectId)).length >= workload.dependencies.length
       );
     }, workload.dependencies.length));
 
@@ -201,22 +271,22 @@ async function main(): Promise<void> {
           chunk.map(([taskId, tagIds]) => ({ taskId, tagIdsOrNames: tagIds })),
         );
       });
-      await waitFor("task tags visible", options, async () =>
-        (await store!.tags.listTaskTags(options.unblockProjectId)).length >= workload.taskTags.length
+      await waitFor(`task tags visible for ${projectOptions.unblockProjectId}`, options, async () =>
+        (await store.tags.listTaskTags(projectOptions.unblockProjectId)).length >= workload.taskTags.length
       );
     }, workload.taskTags.length));
 
     phases.push(await phase("unblock.instructions.create", async () => {
       await services.instructions.addMany(workload.instructions);
-      await waitFor("instructions visible", options, async () =>
-        (await store!.instructions.list(options.unblockProjectId)).length >= workload.instructions.length
+      await waitFor(`instructions visible for ${projectOptions.unblockProjectId}`, options, async () =>
+        (await store.instructions.list(projectOptions.unblockProjectId)).length >= workload.instructions.length
       );
     }, workload.instructions.length));
 
     let matcherMatches = 0;
     phases.push(await phase("unblock.matcher.query", async () => {
       const query = workload.matcherQuery;
-      await waitFor("matcher query matches", options, async () => {
+      await waitFor(`matcher query matches for ${projectOptions.unblockProjectId}`, options, async () => {
         const matches = await services.query.matchIds(query, options.tasks, { includeArchived: true, includeFinished: true });
         matcherMatches = matches.length;
         return matcherMatches > 0;
@@ -228,48 +298,43 @@ async function main(): Promise<void> {
 
     let instructionMatches = 0;
     phases.push(await phase("unblock.instructions.match", async () => {
-      await waitFor("instruction matches", options, async () => {
+      await waitFor(`instruction matches for ${projectOptions.unblockProjectId}`, options, async () => {
         const matches = await services.query.matchingInstructionIds();
         instructionMatches = matches.length;
         return instructionMatches > 0;
       });
     }, workload.instructions.length));
 
-    const report: RunnerReport = {
-      ok: true,
-      workloadId: options.workloadId,
-      endpoint: options.endpoint,
-      schema: options.schema,
-      runtimeBackend: "runtime-v2",
-      scale: {
-        tasks: options.tasks,
-        dependencyFanout: options.dependencyFanout,
-        tags: options.tags,
-        tagFanout: options.tagFanout,
-        instructions: options.instructions,
-        queries: options.queries,
-        concurrency: options.concurrency,
-      },
+    return {
+      workloadId: projectOptions.workloadId,
+      unblockProjectId: projectOptions.unblockProjectId,
+      shardId: projectOptions.shardId ?? prismShardIdForUnblockProject(options.tenantId, projectOptions.unblockProjectId),
       phases,
       totals: {
-        elapsedMs: Math.round(performance.now() - workloadStartedAt),
-        workloadElapsedMs: Math.round(performance.now() - workloadStartedAt),
-        wallElapsedMs: Math.round(performance.now() - startedAt),
-        tasksVisible: (await store.tasks.list(options.unblockProjectId)).length,
-        dependenciesVisible: (await store.dependencies.list(options.unblockProjectId)).length,
-        taskTagsVisible: (await store.tags.listTaskTags(options.unblockProjectId)).length,
-        instructionsVisible: (await store.instructions.list(options.unblockProjectId)).length,
+        tasksVisible: (await store.tasks.list(projectOptions.unblockProjectId)).length,
+        dependenciesVisible: (await store.dependencies.list(projectOptions.unblockProjectId)).length,
+        taskTagsVisible: (await store.tags.listTaskTags(projectOptions.unblockProjectId)).length,
+        instructionsVisible: (await store.instructions.list(projectOptions.unblockProjectId)).length,
         matcherMatches,
         instructionMatches,
       },
     };
-    printReport(report, options);
   } finally {
-    await store?.close?.();
-    if (prism && !options.keepPrism) {
-      await stopProcess(prism);
-    }
+    await store.close?.();
   }
+}
+
+function optionsForProject(options: RunnerOptions, projectIndex: number): RunnerOptions {
+  if (options.projects === 1) return options;
+  const suffix = `p${projectIndex.toString().padStart(3, "0")}`;
+  const unblockProjectId = `${options.unblockProjectId}-${suffix.toUpperCase()}`;
+  const explicitShardId = options.shardId ? `${options.shardId}:project:${suffix}` : undefined;
+  return {
+    ...options,
+    workloadId: `${options.workloadId}-${suffix}`,
+    unblockProjectId,
+    shardId: explicitShardId,
+  };
 }
 
 function buildWorkload(options: RunnerOptions): {
@@ -320,6 +385,61 @@ function buildWorkload(options: RunnerOptions): {
     enabled: true,
   }));
   return { tags, tasks, dependencies, taskTags, instructions, matcherQuery };
+}
+
+function aggregateProjectPhases(projects: ProjectReport[]): PhaseMetric[] {
+  const byName = new Map<string, { elapsedMs: number; count: number | undefined }>();
+  for (const project of projects) {
+    for (const phase of project.phases) {
+      const current = byName.get(phase.name) ?? { elapsedMs: 0, count: undefined };
+      current.elapsedMs = Math.max(current.elapsedMs, phase.elapsedMs);
+      if (phase.count !== undefined) current.count = (current.count ?? 0) + phase.count;
+      byName.set(phase.name, current);
+    }
+  }
+  return [...byName].map(([name, metric]) => ({
+    name: projects.length === 1 ? name : `${name}.max`,
+    elapsedMs: metric.elapsedMs,
+    ...(metric.count === undefined ? {} : { count: metric.count }),
+  }));
+}
+
+function aggregateProjectTotals(projects: ProjectReport[]): WorkloadTotals {
+  const totals = {
+    tasksVisible: 0,
+    dependenciesVisible: 0,
+    taskTagsVisible: 0,
+    instructionsVisible: 0,
+    matcherMatches: 0,
+    instructionMatches: 0,
+  };
+  for (const project of projects) {
+    totals.tasksVisible += project.totals.tasksVisible;
+    totals.dependenciesVisible += project.totals.dependenciesVisible;
+    totals.taskTagsVisible += project.totals.taskTagsVisible;
+    totals.instructionsVisible += project.totals.instructionsVisible;
+    totals.matcherMatches += project.totals.matcherMatches;
+    totals.instructionMatches += project.totals.instructionMatches;
+  }
+  return totals;
+}
+
+function throughput(
+  totals: ReturnType<typeof aggregateProjectTotals>,
+  projectCount: number,
+  elapsedMs: number,
+): RunnerReport["throughput"] {
+  const seconds = Math.max(elapsedMs / 1000, 0.001);
+  return {
+    tasksPerSecond: roundRate(totals.tasksVisible / seconds),
+    dependenciesPerSecond: roundRate(totals.dependenciesVisible / seconds),
+    taskTagsPerSecond: roundRate(totals.taskTagsVisible / seconds),
+    projectsPerSecond: roundRate(projectCount / seconds),
+  };
+}
+
+function roundRate(value: number): number {
+  return Math.round(value * 10) / 10;
 }
 
 function startPrismServe(options: RunnerOptions): PrismProcess {
@@ -472,8 +592,9 @@ function parseArgs(args: string[]): RunnerOptions {
   return {
     workloadId,
     unblockProjectId: stringOption(args, "unblock-project-id", workloadId.toUpperCase().replace(/[^A-Z0-9]+/g, "-")),
+    tenantId: stringOption(args, "tenant-id", "bench-tenant"),
     prismProjectId: stringOption(args, "prism-project-id", "prism"),
-    shardId: stringOption(args, "shard-id", workloadId),
+    shardId: optionalStringOption(args, "shard-id"),
     actorId: stringOption(args, "actor-id", "unblock-bench"),
     machine: stringOption(args, "machine", "benchmark-runner"),
     endpoint,
@@ -487,6 +608,7 @@ function parseArgs(args: string[]): RunnerOptions {
     activate: booleanOption(args, "activate", true),
     keepPrism: booleanOption(args, "keep-prism", false),
     tasks: numberOption(args, "tasks", 50),
+    projects: numberOption(args, "projects", 1),
     dependencyFanout: numberOption(args, "dependency-fanout", 2),
     tags: numberOption(args, "tags", 6),
     tagFanout: numberOption(args, "tag-fanout", 1),
@@ -552,6 +674,7 @@ function printReport(report: RunnerReport, options: RunnerOptions): void {
     console.log(`${phase.name}: ${phase.elapsedMs}ms${phase.count === undefined ? "" : ` count=${phase.count}`}`);
   }
   console.log(`workloadTotal: ${report.totals.workloadElapsedMs}ms wallTotal: ${report.totals.wallElapsedMs}ms tasks=${report.totals.tasksVisible} dependencies=${report.totals.dependenciesVisible} taskTags=${report.totals.taskTagsVisible} matcherMatches=${report.totals.matcherMatches} instructionMatches=${report.totals.instructionMatches}`);
+  console.log(`throughput: tasks=${report.throughput.tasksPerSecond}/s dependencies=${report.throughput.dependenciesPerSecond}/s taskTags=${report.throughput.taskTagsPerSecond}/s projects=${report.throughput.projectsPerSecond}/s`);
 }
 
 function sleep(ms: number): Promise<void> {

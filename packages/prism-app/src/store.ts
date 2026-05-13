@@ -42,6 +42,8 @@ import { lowerMatcherQueryToPrismFragment, type MatcherFragmentLowering, type Ma
 export interface PrismStoreOptions {
   endpoint?: string;
   projectId?: string;
+  tenantId?: string;
+  unblockProjectId?: string;
   shardId?: string;
   actorId?: string;
   client?: PrismRuntimeClient;
@@ -100,6 +102,14 @@ export interface PrismRuntimeClient {
     sourceHash?: string;
     budget?: Record<string, unknown>;
   }): Promise<RuntimeQueryFragmentRecord>;
+  compileRuntimeQueryFragment?(input: {
+    projectId: string;
+    fragmentId: string;
+    purpose?: string;
+    sourceKind: "typescript_app" | "authoring_ir_json";
+    sourceJson: string;
+    denyWarnings?: boolean;
+  }): Promise<RuntimeQueryFragmentArtifact>;
   upsertRuntimeQueryFragmentUse(input: {
     projectId: string;
     appId: string;
@@ -196,6 +206,14 @@ export type PrismSemanticOperation =
   | { family: "tag"; operation: { Set: { subject_ref: string; tag_id: string; value_key: string | null; value: unknown; origin: string | null } } }
   | { family: "tag"; operation: { Clear: { subject_ref: string; tag_id: string; value_key: string | null } } };
 
+export function prismShardIdForUnblockProject(tenantId: string, projectId: string): string {
+  const tenant = tenantId.trim();
+  const project = projectId.trim();
+  if (!tenant) throw new Error("tenantId is required to derive a Prism shard id");
+  if (!project) throw new Error("projectId is required to derive a Prism shard id");
+  return `tenant:${tenant}:project:${project}`;
+}
+
 export function createPrismStore(options: PrismStoreOptions = {}): PrismStore {
   if (options.offline && !options.client) {
     throw new Error("PrismStore no longer has an offline compatibility cache; provide a PrismRuntimeClient or use the sqlite backend.");
@@ -204,12 +222,17 @@ export function createPrismStore(options: PrismStoreOptions = {}): PrismStore {
   if (options.endpoint !== undefined) grpcOptions.endpoint = options.endpoint;
   if (options.protoPath !== undefined) grpcOptions.protoPath = options.protoPath;
   const client = options.client ?? new PrismGrpcRuntimeClient(grpcOptions);
+  const projectId = options.projectId ?? "prism";
+  const shardId = options.shardId
+    ?? (options.unblockProjectId
+      ? prismShardIdForUnblockProject(options.tenantId ?? "local", options.unblockProjectId)
+      : "default");
   return new PrismStore({
     client,
-    projectId: options.projectId ?? "prism",
-    shardId: options.shardId ?? "default",
+    projectId,
+    shardId,
     actorId: options.actorId ?? "unblock-api",
-    fragmentCompiler: options.fragmentCompiler ?? new PrismCliMatcherFragmentCompiler(),
+    fragmentCompiler: options.fragmentCompiler ?? new PrismRuntimeMatcherFragmentCompiler(client, { projectId }),
     matcherFragmentLoweringOptions: options.matcherFragmentLoweringOptions ?? defaultMatcherFragmentLoweringOptions(),
   });
 }
@@ -560,6 +583,25 @@ export class PrismGrpcRuntimeClient implements PrismRuntimeClient {
     return runtimeQueryFragmentRecordFromProto(response);
   }
 
+  async compileRuntimeQueryFragment(input: {
+    projectId: string;
+    fragmentId: string;
+    purpose?: string;
+    sourceKind: "typescript_app" | "authoring_ir_json";
+    sourceJson: string;
+    denyWarnings?: boolean;
+  }): Promise<RuntimeQueryFragmentArtifact> {
+    const response = await unary<CompileRuntimeQueryFragmentResponse>(this.client, "CompileRuntimeQueryFragment", {
+      project_id: input.projectId,
+      fragment_id: input.fragmentId,
+      purpose: input.purpose ?? "",
+      source_kind: input.sourceKind,
+      source_json: input.sourceJson,
+      deny_warnings: input.denyWarnings ?? false,
+    });
+    return JSON.parse(response.artifact_json) as RuntimeQueryFragmentArtifact;
+  }
+
   async upsertRuntimeQueryFragmentUse(input: {
     projectId: string;
     appId: string;
@@ -636,6 +678,33 @@ export class PrismCliMatcherFragmentCompiler implements MatcherFragmentCompiler 
 
   private baseArtifactDir(): string {
     return this.options.baseArtifactDir ?? process.env.UNBLOCK_PRISM_BASE_ARTIFACT_DIR ?? join(packageRoot(), "generated");
+  }
+}
+
+export class PrismRuntimeMatcherFragmentCompiler implements MatcherFragmentCompiler {
+  constructor(private readonly client: PrismRuntimeClient, private readonly options: {
+    projectId: string;
+    purpose?: string;
+    denyWarnings?: boolean;
+  }) {}
+
+  async compile(fragment: MatcherFragmentLowering): Promise<RuntimeQueryFragmentArtifact> {
+    if (!this.client.compileRuntimeQueryFragment) {
+      throw new Error("Prism runtime client does not support runtime query fragment compilation");
+    }
+    return await this.client.compileRuntimeQueryFragment({
+      projectId: this.options.projectId,
+      fragmentId: fragment.fragmentId,
+      purpose: this.options.purpose ?? "unblock.matcher",
+      sourceKind: "typescript_app",
+      sourceJson: JSON.stringify({
+        entrypoint: "src/app.ts",
+        files: {
+          "src/app.ts": fragment.source,
+        },
+      }),
+      denyWarnings: this.options.denyWarnings ?? false,
+    });
   }
 }
 
@@ -1622,6 +1691,7 @@ function numberValue(value: unknown, fallback: number): number {
 }
 
 type RuntimeMethod =
+  | "CompileRuntimeQueryFragment"
   | "SubmitSemanticCommit"
   | "ReadMaterializedSurface"
   | "Query"
@@ -1663,6 +1733,16 @@ interface SubjectTagsResponse {
 
 interface TagSubjectsResponse {
   assignments: ProtoTagAssignment[];
+}
+
+interface CompileRuntimeQueryFragmentResponse {
+  project_id: string;
+  app_id: string;
+  fragment_id: string;
+  fragment_hash: string;
+  base_manifest_hash: string;
+  state: string;
+  artifact_json: string;
 }
 
 interface RuntimeQueryFragmentResponse {

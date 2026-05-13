@@ -7,6 +7,7 @@ service RuntimeService {
   rpc ActiveManifest(ActiveManifestRequest) returns (ActiveManifestResponse);
   rpc ExecuteCommand(ExecuteCommandRequest) returns (ExecuteCommandResponse);
   rpc SubmitSemanticCommit(SubmitSemanticCommitRequest) returns (SubmitSemanticCommitResponse);
+  rpc CompileRuntimeQueryFragment(CompileRuntimeQueryFragmentRequest) returns (CompileRuntimeQueryFragmentResponse);
   rpc StoreRuntimeQueryFragment(StoreRuntimeQueryFragmentRequest) returns (RuntimeQueryFragmentResponse);
   rpc UpsertRuntimeQueryFragmentUse(UpsertRuntimeQueryFragmentUseRequest) returns (RuntimeQueryFragmentUseResponse);
   rpc Query(QueryRequest) returns (QueryResponse);
@@ -112,6 +113,25 @@ message SubmitSemanticCommitResponse {
   uint64 elapsed_ms = 6;
   uint32 operation_count = 7;
   uint32 mutation_count = 8;
+}
+
+message CompileRuntimeQueryFragmentRequest {
+  string project_id = 1;
+  string fragment_id = 2;
+  string purpose = 3;
+  string source_kind = 4;
+  string source_json = 5;
+  bool deny_warnings = 6;
+}
+
+message CompileRuntimeQueryFragmentResponse {
+  string project_id = 1;
+  string app_id = 2;
+  string fragment_id = 3;
+  string fragment_hash = 4;
+  string base_manifest_hash = 5;
+  string state = 6;
+  string artifact_json = 7;
 }
 
 message StoreRuntimeQueryFragmentRequest {
@@ -741,8 +761,9 @@ message RuntimeRequest {
     WorkflowWatchRequest watch_workflow = 33;
     WorkflowEditRequest edit_workflow = 34;
     SubmitSemanticCommitRequest submit_semantic_commit = 35;
-    StoreRuntimeQueryFragmentRequest store_runtime_query_fragment = 36;
-    UpsertRuntimeQueryFragmentUseRequest upsert_runtime_query_fragment_use = 37;
+    CompileRuntimeQueryFragmentRequest compile_runtime_query_fragment = 36;
+    StoreRuntimeQueryFragmentRequest store_runtime_query_fragment = 37;
+    UpsertRuntimeQueryFragmentUseRequest upsert_runtime_query_fragment_use = 38;
   }
 }
 
@@ -776,8 +797,9 @@ message RuntimeResponse {
     WorkflowReadResponse watch_workflow = 34;
     WorkflowEditResponse edit_workflow = 35;
     SubmitSemanticCommitResponse submit_semantic_commit = 36;
-    RuntimeQueryFragmentResponse runtime_query_fragment = 37;
-    RuntimeQueryFragmentUseResponse runtime_query_fragment_use = 38;
+    CompileRuntimeQueryFragmentResponse compile_runtime_query_fragment = 37;
+    RuntimeQueryFragmentResponse runtime_query_fragment = 38;
+    RuntimeQueryFragmentUseResponse runtime_query_fragment_use = 39;
   }
 }
 
