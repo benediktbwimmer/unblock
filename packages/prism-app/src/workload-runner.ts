@@ -9,6 +9,7 @@ import { createServices, type AppStore } from "@unblock/core";
 import { createPrismStore, prismShardIdForUnblockProject, type PrismStore } from "./store.js";
 
 interface RunnerOptions {
+  mode: "bulk" | "mixed";
   workloadId: string;
   unblockProjectId: string;
   tenantId: string;
@@ -33,6 +34,7 @@ interface RunnerOptions {
   tagFanout: number;
   instructions: number;
   queries: number;
+  mixedOperations: number;
   concurrency: number;
   waitTimeoutMs: number;
   waitPollMs: number;
@@ -65,6 +67,8 @@ interface RunnerReport {
   scale: {
     tasks: number;
     projects: number;
+    mode: "bulk" | "mixed";
+    mixedOperations: number;
     dependencyFanout: number;
     tags: number;
     tagFanout: number;
@@ -85,6 +89,7 @@ interface RunnerReport {
     projectsPerSecond: number;
   };
   projects?: ProjectReport[];
+  mixed?: MixedWorkloadSummary;
 }
 
 interface ProjectReport {
@@ -94,6 +99,21 @@ interface ProjectReport {
   phases: PhaseMetric[];
   totals: {
   } & WorkloadTotals;
+  mixed?: MixedWorkloadSummary;
+}
+
+interface MixedWorkloadSummary {
+  operations: number;
+  operationCounts: Record<string, number>;
+  operationStats?: Record<string, MixedOperationStats>;
+  operationsPerSecond?: number;
+}
+
+interface MixedOperationStats {
+  count: number;
+  totalMs: number;
+  maxMs: number;
+  avgMs: number;
 }
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -154,13 +174,15 @@ async function main(): Promise<void> {
     workloadStartedAt = performance.now();
 
     const projectStartedAt = performance.now();
+    const projectRunner = options.mode === "mixed" ? runProjectMixedWorkload : runProjectWorkload;
     const projectReports = await Promise.all(
-      Array.from({ length: options.projects }, (_, index) => runProjectWorkload(options, index)),
+      Array.from({ length: options.projects }, (_, index) => projectRunner(options, index)),
     );
     const workloadElapsedMs = Math.round(performance.now() - projectStartedAt);
     phases.push(...aggregateProjectPhases(projectReports));
     const totals = aggregateProjectTotals(projectReports);
 
+    const mixed = aggregateMixedSummaries(projectReports, workloadElapsedMs);
     const report: RunnerReport = {
       ok: true,
       workloadId: options.workloadId,
@@ -170,6 +192,8 @@ async function main(): Promise<void> {
       scale: {
         tasks: options.tasks,
         projects: options.projects,
+        mode: options.mode,
+        mixedOperations: options.mixedOperations,
         dependencyFanout: options.dependencyFanout,
         tags: options.tags,
         tagFanout: options.tagFanout,
@@ -186,6 +210,7 @@ async function main(): Promise<void> {
       },
       throughput: throughput(totals, options.projects, workloadElapsedMs),
       projects: projectReports,
+      ...(mixed ? { mixed } : {}),
     };
     printReport(report, options);
   } finally {
@@ -324,6 +349,124 @@ async function runProjectWorkload(options: RunnerOptions, projectIndex: number):
   }
 }
 
+async function runProjectMixedWorkload(options: RunnerOptions, projectIndex: number): Promise<ProjectReport> {
+  const seed = await runProjectWorkload({ ...options, mode: "bulk", queries: Math.min(options.queries, 2) }, projectIndex);
+  const projectOptions = optionsForProject(options, projectIndex);
+  const store = createPrismStore({
+    endpoint: options.endpoint,
+    projectId: options.prismProjectId,
+    tenantId: options.tenantId,
+    unblockProjectId: projectOptions.unblockProjectId,
+    ...(projectOptions.shardId ? { shardId: projectOptions.shardId } : {}),
+    actorId: options.actorId,
+  });
+  try {
+    const services = createServices(store, {
+      projectId: projectOptions.unblockProjectId,
+      machine: options.machine,
+      actor: options.actorId,
+    });
+    const workload = buildWorkload(projectOptions);
+    const operationStats = new Map<string, { count: number; totalMs: number; maxMs: number }>();
+    const mixedPhase = await phase("unblock.mixed.operations", async () => {
+      await parallelMap(Array.from({ length: options.mixedOperations }, (_, index) => index), options.concurrency, async (index) => {
+        const startedAt = performance.now();
+        const kind = await runMixedOperation(services, store, workload, projectOptions, index);
+        const elapsedMs = Math.round(performance.now() - startedAt);
+        const current = operationStats.get(kind) ?? { count: 0, totalMs: 0, maxMs: 0 };
+        current.count += 1;
+        current.totalMs += elapsedMs;
+        current.maxMs = Math.max(current.maxMs, elapsedMs);
+        operationStats.set(kind, current);
+      });
+    }, options.mixedOperations);
+
+    const mixed: MixedWorkloadSummary = {
+      operations: options.mixedOperations,
+      operationCounts: Object.fromEntries([...operationStats].sort(([left], [right]) => left.localeCompare(right)).map(([kind, stats]) => [kind, stats.count])),
+      operationStats: mixedOperationStatsJson(operationStats),
+    };
+    return {
+      ...seed,
+      phases: [...seed.phases, mixedPhase],
+      totals: {
+        tasksVisible: (await store.tasks.list(projectOptions.unblockProjectId)).length,
+        dependenciesVisible: (await store.dependencies.list(projectOptions.unblockProjectId)).length,
+        taskTagsVisible: (await store.tags.listTaskTags(projectOptions.unblockProjectId)).length,
+        instructionsVisible: (await store.instructions.list(projectOptions.unblockProjectId)).length,
+        matcherMatches: seed.totals.matcherMatches,
+        instructionMatches: seed.totals.instructionMatches,
+      },
+      mixed,
+    };
+  } finally {
+    await store.close?.();
+  }
+}
+
+async function runMixedOperation(
+  services: ReturnType<typeof createServices>,
+  store: PrismStore,
+  workload: ReturnType<typeof buildWorkload>,
+  projectOptions: RunnerOptions,
+  index: number,
+): Promise<string> {
+  const task = workload.tasks[index % workload.tasks.length]!;
+  const previous = workload.tasks[Math.max(0, (index % workload.tasks.length) - 1)]!;
+  const tag = workload.tags[index % workload.tags.length]!;
+  const instruction = workload.instructions[index % workload.instructions.length]!;
+  switch (index % 10) {
+    case 0:
+      await services.tasks.edit(task.id, {
+        title: `${task.title} update ${index}`,
+        priority: ((task.priority + index) % 5) as 0 | 1 | 2 | 3 | 4,
+      });
+      return "task.update";
+    case 1:
+      await services.tasks.edit(task.id, {
+        description: `${task.description} Mixed workload update ${index}.`,
+        lifecycle: index % 4 === 1 ? "started" : "open",
+      });
+      return "task.lifecycle";
+    case 2: {
+      const taskIndex = index % workload.tasks.length;
+      const dependencyIndex = taskIndex > 0 ? Math.max(0, taskIndex - 3) : 1;
+      const dependencyTask = workload.tasks[dependencyIndex];
+      if (!dependencyTask || dependencyTask.id === task.id) return "dependency.add.skipped";
+      await services.dependencies.addMany([{ taskId: task.id, dependsOnTaskId: dependencyTask.id }]);
+      return "dependency.add";
+    }
+    case 3:
+      await services.dependencies.remove(task.id, previous.id);
+      return "dependency.remove";
+    case 4:
+      await services.tags.assignMany([{ taskId: task.id, tagIdsOrNames: [tag] }]);
+      return "tag.assign";
+    case 5:
+      await services.tags.remove(task.id, tag);
+      return "tag.remove";
+    case 6:
+      await services.instructions.edit(instruction.id, {
+        body: `${instruction.body} Mixed workload update ${index}.`,
+        enabled: index % 20 !== 6,
+      });
+      return "instruction.update";
+    case 7:
+      await services.query.matchIds(workload.matcherQuery, 100, { includeArchived: true, includeFinished: true });
+      return "matcher.query";
+    case 8:
+      await services.query.matchingInstructionIds();
+      return "instruction.match";
+    default:
+      await Promise.all([
+        services.query.list({ includeArchived: true, includeFinished: true }),
+        store.dependencies.list(projectOptions.unblockProjectId),
+        store.tags.listTaskTags(projectOptions.unblockProjectId),
+      ]);
+      return "read.scan";
+  }
+}
+
 function optionsForProject(options: RunnerOptions, projectIndex: number): RunnerOptions {
   if (options.projects === 1) return options;
   const suffix = `p${projectIndex.toString().padStart(3, "0")}`;
@@ -422,6 +565,40 @@ function aggregateProjectTotals(projects: ProjectReport[]): WorkloadTotals {
     totals.instructionMatches += project.totals.instructionMatches;
   }
   return totals;
+}
+
+function aggregateMixedSummaries(projects: ProjectReport[], elapsedMs: number): MixedWorkloadSummary | undefined {
+  const mixedProjects = projects.filter((project) => project.mixed);
+  if (mixedProjects.length === 0) return undefined;
+  const operationStats = new Map<string, { count: number; totalMs: number; maxMs: number }>();
+  let operations = 0;
+  for (const project of mixedProjects) {
+    const mixed = project.mixed!;
+    operations += mixed.operations;
+    for (const [kind, stats] of Object.entries(mixed.operationStats ?? {})) {
+      const current = operationStats.get(kind) ?? { count: 0, totalMs: 0, maxMs: 0 };
+      current.count += stats.count;
+      current.totalMs += stats.totalMs;
+      current.maxMs = Math.max(current.maxMs, stats.maxMs);
+      operationStats.set(kind, current);
+    }
+  }
+  const seconds = Math.max(elapsedMs / 1000, 0.001);
+  return {
+    operations,
+    operationCounts: Object.fromEntries([...operationStats].sort(([left], [right]) => left.localeCompare(right)).map(([kind, stats]) => [kind, stats.count])),
+    operationStats: mixedOperationStatsJson(operationStats),
+    operationsPerSecond: roundRate(operations / seconds),
+  };
+}
+
+function mixedOperationStatsJson(stats: Map<string, { count: number; totalMs: number; maxMs: number }>): Record<string, MixedOperationStats> {
+  return Object.fromEntries([...stats].sort(([left], [right]) => left.localeCompare(right)).map(([kind, value]) => [kind, {
+    count: value.count,
+    totalMs: value.totalMs,
+    maxMs: value.maxMs,
+    avgMs: roundRate(value.totalMs / Math.max(value.count, 1)),
+  }]));
 }
 
 function throughput(
@@ -589,7 +766,9 @@ function parseArgs(args: string[]): RunnerOptions {
   const bind = stringOption(args, "bind", "127.0.0.1:50061");
   const endpoint = stringOption(args, "endpoint", `http://${bind}`);
   const schema = stringOption(args, "schema", "prism");
+  const mode = parseMode(stringOption(args, "mode", args.includes("--mixed") ? "mixed" : "bulk"));
   return {
+    mode,
     workloadId,
     unblockProjectId: stringOption(args, "unblock-project-id", workloadId.toUpperCase().replace(/[^A-Z0-9]+/g, "-")),
     tenantId: stringOption(args, "tenant-id", "bench-tenant"),
@@ -614,11 +793,17 @@ function parseArgs(args: string[]): RunnerOptions {
     tagFanout: numberOption(args, "tag-fanout", 1),
     instructions: numberOption(args, "instructions", 3),
     queries: numberOption(args, "queries", 5),
+    mixedOperations: numberOption(args, "mixed-operations", 100),
     concurrency: numberOption(args, "concurrency", Math.min(8, Math.max(1, cpus().length))),
     waitTimeoutMs: numberOption(args, "wait-timeout-ms", 60_000),
     waitPollMs: numberOption(args, "wait-poll-ms", 250),
     json: booleanOption(args, "json", false),
   };
+}
+
+function parseMode(value: string): "bulk" | "mixed" {
+  if (value === "bulk" || value === "mixed") return value;
+  throw new Error("--mode must be bulk or mixed");
 }
 
 function defaultPrismCli(): string {
@@ -675,6 +860,9 @@ function printReport(report: RunnerReport, options: RunnerOptions): void {
   }
   console.log(`workloadTotal: ${report.totals.workloadElapsedMs}ms wallTotal: ${report.totals.wallElapsedMs}ms tasks=${report.totals.tasksVisible} dependencies=${report.totals.dependenciesVisible} taskTags=${report.totals.taskTagsVisible} matcherMatches=${report.totals.matcherMatches} instructionMatches=${report.totals.instructionMatches}`);
   console.log(`throughput: tasks=${report.throughput.tasksPerSecond}/s dependencies=${report.throughput.dependenciesPerSecond}/s taskTags=${report.throughput.taskTagsPerSecond}/s projects=${report.throughput.projectsPerSecond}/s`);
+  if (report.mixed) {
+    console.log(`mixed: operations=${report.mixed.operations} rate=${report.mixed.operationsPerSecond}/s counts=${JSON.stringify(report.mixed.operationCounts)}`);
+  }
 }
 
 function sleep(ms: number): Promise<void> {
