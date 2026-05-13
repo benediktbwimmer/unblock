@@ -301,6 +301,74 @@ export class TaskService {
     return task;
   }
 
+  async addMany(inputs: AddTaskInput[]): Promise<Task[]> {
+    const now = nowIso();
+    const tasks = inputs.map((input) => {
+      const parsed = addTaskSchema.parse(input);
+      const id = normalizeId(parsed.id);
+      const parentTaskId = parsed.parentTaskId ? normalizeId(parsed.parentTaskId) : null;
+      return {
+        projectId: this.projectId,
+        id,
+        parentTaskId,
+        title: parsed.title,
+        description: parsed.description,
+        lifecycle: parsed.lifecycle,
+        priority: parsed.priority,
+        size: parsed.size,
+        sourceDoc: parsed.sourceDoc,
+        sourceSection: parsed.sourceSection,
+        sourceAnchor: parsed.sourceAnchor,
+        sourceLine: parsed.sourceLine,
+        sourceText: parsed.sourceText,
+        completionBar: parsed.completionBar,
+        createdAt: now,
+        updatedAt: now,
+        startedAt: parsed.lifecycle === "started" || parsed.lifecycle === "finished" ? now : null,
+        finishedAt: parsed.lifecycle === "finished" ? now : null,
+        archivedAt: null,
+        version: 1
+      } satisfies Task;
+    });
+    if (tasks.length === 0) return [];
+
+    const byInputId = new Set<string>();
+    for (const task of tasks) {
+      if (byInputId.has(task.id)) {
+        conflict(`Task already exists: ${task.id}`);
+      }
+      byInputId.add(task.id);
+    }
+
+    await this.store.transaction(async (repos) => {
+      const existing = await repos.tasks.list(this.projectId);
+      const taskById = new Map(existing.map((task) => [task.id, task]));
+      for (const task of tasks) {
+        if (taskById.has(task.id)) {
+          conflict(`Task already exists: ${task.id}`);
+        }
+        taskById.set(task.id, task);
+      }
+      const combined = [...taskById.values()];
+      for (const task of tasks) {
+        const parent = task.parentTaskId ? taskById.get(task.parentTaskId) ?? notFound("task", task.parentTaskId) : null;
+        if (parent?.archivedAt) {
+          validation("Archived tasks cannot be parents in V1.", { taskId: task.id, parentTaskId: task.parentTaskId });
+        }
+        if (task.parentTaskId) {
+          assertNoParentCycle(task.id, task.parentTaskId, combined);
+        }
+        ensureFinishedParentDoesNotContainUnfinishedChild(parent, task);
+      }
+      for (const task of tasks) {
+        await repos.tasks.create(task);
+      }
+      await repos.activity.append(this.activity.make(this.projectId, "task.batch_created", "project", this.projectId, `Created ${tasks.length} tasks`, { count: tasks.length }));
+    });
+
+    return tasks;
+  }
+
   async upsertFromImport(input: AddTaskInput): Promise<"created" | "updated" | "skipped"> {
     const parsed = addTaskSchema.parse(input);
     const id = normalizeId(parsed.id);
@@ -2527,6 +2595,7 @@ function normalizeImportedComment(input: unknown, now: string): Comment {
 function validateDependencyGraph(tasks: Task[], dependencies: Dependency[]): void {
   const taskById = new Map(tasks.map((task) => [task.id, task]));
   const seen = new Set<string>();
+  const uniqueDependencies: Dependency[] = [];
   for (const dependency of dependencies) {
     if (!taskById.has(dependency.taskId)) {
       validation("Dependency references a missing task.", dependency);
@@ -2542,8 +2611,62 @@ function validateDependencyGraph(tasks: Task[], dependencies: Dependency[]): voi
       continue;
     }
     seen.add(key);
-    assertNoCycle(dependency.taskId, dependency.dependsOnTaskId, dependencies.filter((edge) => dependencyKey(edge.taskId, edge.dependsOnTaskId) !== key));
-    assertNoHierarchyDependency(dependency.taskId, dependency.dependsOnTaskId, tasks);
+    uniqueDependencies.push(dependency);
+  }
+  assertDependencyGraphIsAcyclic(uniqueDependencies);
+  assertDependenciesDoNotConflictWithHierarchy(uniqueDependencies, tasks);
+}
+
+function assertDependencyGraphIsAcyclic(dependencies: Dependency[]): void {
+  const graph = buildGraphIndexes(dependencies);
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+
+  const visit = (taskId: string, rootId: string): void => {
+    if (visited.has(taskId)) return;
+    if (visiting.has(taskId)) {
+      conflict("Dependency would create a cycle.", { taskId: rootId });
+    }
+    visiting.add(taskId);
+    for (const dependencyId of graph.dependenciesByTask.get(taskId) ?? []) {
+      visit(dependencyId, rootId);
+    }
+    visiting.delete(taskId);
+    visited.add(taskId);
+  };
+
+  for (const dependency of dependencies) {
+    visit(dependency.taskId, dependency.taskId);
+  }
+}
+
+function assertDependenciesDoNotConflictWithHierarchy(dependencies: Dependency[], tasks: Task[]): void {
+  const hierarchy = buildHierarchyIndexes(tasks);
+  const ancestorsByTask = new Map<string, Set<string>>();
+  const ancestors = (taskId: string): Set<string> => {
+    const cached = ancestorsByTask.get(taskId);
+    if (cached) return cached;
+    const result = new Set<string>();
+    let current = hierarchy.parentByChild.get(taskId) ?? null;
+    const seen = new Set<string>();
+    while (current && !seen.has(current)) {
+      seen.add(current);
+      result.add(current);
+      current = hierarchy.parentByChild.get(current) ?? null;
+    }
+    ancestorsByTask.set(taskId, result);
+    return result;
+  };
+
+  for (const dependency of dependencies) {
+    const taskAncestors = ancestors(dependency.taskId);
+    const dependencyAncestors = ancestors(dependency.dependsOnTaskId);
+    if (dependencyAncestors.has(dependency.taskId)) {
+      validation("A task cannot depend on one of its descendants because hierarchy already gates parent completion.", dependency);
+    }
+    if (taskAncestors.has(dependency.dependsOnTaskId)) {
+      validation("A task cannot depend on one of its ancestors because that would deadlock hierarchy completion.", dependency);
+    }
   }
 }
 

@@ -63,6 +63,8 @@ interface RunnerReport {
   phases: PhaseMetric[];
   totals: {
     elapsedMs: number;
+    workloadElapsedMs: number;
+    wallElapsedMs: number;
     tasksVisible: number;
     dependenciesVisible: number;
     taskTagsVisible: number;
@@ -85,6 +87,7 @@ async function main(): Promise<void> {
 
   const phases: PhaseMetric[] = [];
   const startedAt = performance.now();
+  let workloadStartedAt = startedAt;
   let prism: PrismProcess | null = null;
   let store: PrismStore | null = null;
 
@@ -126,6 +129,7 @@ async function main(): Promise<void> {
         await waitForRuntimeHealth(options);
       }));
     }
+    workloadStartedAt = performance.now();
 
     store = createPrismStore({
       endpoint: options.endpoint,
@@ -162,14 +166,15 @@ async function main(): Promise<void> {
     }, workload.tags.length));
 
     phases.push(await phase("unblock.tasks.create", async () => {
-      await parallelMap(workload.tasks, options.concurrency, async (task) => {
-        await services.tasks.add({
+      const chunks = chunked(workload.tasks, Math.max(1, Math.ceil(workload.tasks.length / options.concurrency)));
+      await parallelMap(chunks, options.concurrency, async (chunk) => {
+        await services.tasks.addMany(chunk.map((task) => ({
           id: task.id,
           title: task.title,
           description: task.description,
           priority: task.priority,
           lifecycle: task.lifecycle,
-        });
+        })));
       });
       await waitFor("tasks visible", options, async () =>
         (await store!.tasks.list(options.unblockProjectId)).length >= options.tasks
@@ -249,7 +254,9 @@ async function main(): Promise<void> {
       },
       phases,
       totals: {
-        elapsedMs: Math.round(performance.now() - startedAt),
+        elapsedMs: Math.round(performance.now() - workloadStartedAt),
+        workloadElapsedMs: Math.round(performance.now() - workloadStartedAt),
+        wallElapsedMs: Math.round(performance.now() - startedAt),
         tasksVisible: (await store.tasks.list(options.unblockProjectId)).length,
         dependenciesVisible: (await store.dependencies.list(options.unblockProjectId)).length,
         taskTagsVisible: (await store.tags.listTaskTags(options.unblockProjectId)).length,
@@ -546,7 +553,7 @@ function printReport(report: RunnerReport, options: RunnerOptions): void {
   for (const phase of report.phases) {
     console.log(`${phase.name}: ${phase.elapsedMs}ms${phase.count === undefined ? "" : ` count=${phase.count}`}`);
   }
-  console.log(`total: ${report.totals.elapsedMs}ms tasks=${report.totals.tasksVisible} dependencies=${report.totals.dependenciesVisible} taskTags=${report.totals.taskTagsVisible} matcherMatches=${report.totals.matcherMatches} instructionMatches=${report.totals.instructionMatches}`);
+  console.log(`workloadTotal: ${report.totals.workloadElapsedMs}ms wallTotal: ${report.totals.wallElapsedMs}ms tasks=${report.totals.tasksVisible} dependencies=${report.totals.dependenciesVisible} taskTags=${report.totals.taskTagsVisible} matcherMatches=${report.totals.matcherMatches} instructionMatches=${report.totals.instructionMatches}`);
 }
 
 function sleep(ms: number): Promise<void> {
