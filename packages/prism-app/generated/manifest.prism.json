@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "project_id": "prism",
-  "manifest_hash": "3b6ea961413d1e00",
+  "manifest_hash": "05191c50619d42e1",
   "apps": [
     {
       "id": "unblock",
@@ -17553,7 +17553,7 @@
     {
       "kind": "type_script_metadata",
       "path": "typescript/runtime.ts",
-      "hash": "458e1729c91f740e"
+      "hash": "4085cb9450e03562"
     },
     {
       "kind": "type_script_metadata",

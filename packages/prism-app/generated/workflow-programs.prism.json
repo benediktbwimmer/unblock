@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "project_id": "prism",
-  "manifest_hash": "3b6ea961413d1e00",
+  "manifest_hash": "05191c50619d42e1",
   "generated_by": "prism-compiler",
   "description": "Executable Prism Workflow IR lowered from TypeScript authoring declarations",
   "programs": [],
@@ -10,7 +10,7 @@
     "source": "compiler",
     "generation_report": {
       "project_id": "prism",
-      "manifest_hash": "3b6ea961413d1e00",
+      "manifest_hash": "05191c50619d42e1",
       "manifest_workflows": 0,
       "generated_programs": 0,
       "skipped_workflows": 0,

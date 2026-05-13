@@ -1,5 +1,9 @@
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { credentials, loadPackageDefinition, type ChannelCredentials, type Client, type ServiceError } from "@grpc/grpc-js";
 import { loadSync } from "@grpc/proto-loader";
 import {
@@ -32,7 +36,7 @@ import {
   type TrackAssignment,
   type TrackRepository,
 } from "@unblock/core";
-import { lowerMatcherQueryToPrismFragment } from "./matcher-fragment.js";
+import { lowerMatcherQueryToPrismFragment, type MatcherFragmentLowering, type MatcherFragmentLoweringOptions } from "./matcher-fragment.js";
 
 export interface PrismStoreOptions {
   endpoint?: string;
@@ -42,6 +46,8 @@ export interface PrismStoreOptions {
   client?: PrismRuntimeClient;
   protoPath?: string;
   offline?: boolean;
+  fragmentCompiler?: MatcherFragmentCompiler;
+  matcherFragmentLoweringOptions?: MatcherFragmentLoweringOptions;
 }
 
 export interface PrismRuntimeClient {
@@ -85,7 +91,63 @@ export interface PrismRuntimeClient {
     limit?: number;
     offset?: number;
   }): Promise<PrismTagAssignment[]>;
+  storeRuntimeQueryFragment(input: {
+    projectId: string;
+    artifact: RuntimeQueryFragmentArtifact;
+    owner?: string;
+    sourceKind?: string;
+    sourceHash?: string;
+    budget?: Record<string, unknown>;
+  }): Promise<RuntimeQueryFragmentRecord>;
+  upsertRuntimeQueryFragmentUse(input: {
+    projectId: string;
+    appId: string;
+    fragmentId: string;
+    consumerKind: string;
+    consumerId: string;
+    fragmentHash?: string;
+    materializationTarget?: Record<string, unknown>;
+    replacementScope?: unknown;
+    enabled?: boolean;
+  }): Promise<RuntimeQueryFragmentUseRecord>;
   close?(): void;
+}
+
+export interface MatcherFragmentCompiler {
+  compile(fragment: MatcherFragmentLowering): Promise<RuntimeQueryFragmentArtifact>;
+}
+
+export interface RuntimeQueryFragmentArtifact extends Record<string, unknown> {
+  artifact_version: number;
+  project_id: string;
+  app_id: string;
+  fragment_id: string;
+  fragment_hash: string;
+  base_manifest_hash: string;
+  purpose: string;
+  state: "admitted" | "rejected" | string;
+  supported_modes: string[];
+}
+
+export interface RuntimeQueryFragmentRecord {
+  projectId: string;
+  appId: string;
+  fragmentId: string;
+  fragmentHash: string;
+  baseManifestHash: string;
+  state: string;
+  record: Record<string, unknown>;
+}
+
+export interface RuntimeQueryFragmentUseRecord {
+  projectId: string;
+  appId: string;
+  fragmentId: string;
+  consumerKind: string;
+  consumerId: string;
+  fragmentHash: string;
+  enabled: boolean;
+  record: Record<string, unknown>;
 }
 
 export interface PrismTagAssignment {
@@ -143,9 +205,11 @@ export function createPrismStore(options: PrismStoreOptions = {}): PrismStore {
   const client = options.client ?? new PrismGrpcRuntimeClient(grpcOptions);
   return new PrismStore({
     client,
-    projectId: options.projectId ?? "unblock",
+    projectId: options.projectId ?? "prism",
     shardId: options.shardId ?? "default",
     actorId: options.actorId ?? "unblock-api",
+    fragmentCompiler: options.fragmentCompiler ?? new PrismCliMatcherFragmentCompiler(),
+    matcherFragmentLoweringOptions: options.matcherFragmentLoweringOptions ?? defaultMatcherFragmentLoweringOptions(),
   });
 }
 
@@ -164,12 +228,15 @@ export class PrismStore implements AppStore {
   readonly matcher: MatcherQueryRepository;
 
   private pending: PrismMutation[] | null = null;
+  private readonly matcherFragments = new Map<string, Promise<AdmittedMatcherFragment>>();
 
   constructor(private readonly options: {
     client: PrismRuntimeClient;
     projectId: string;
     shardId: string;
     actorId: string;
+    fragmentCompiler: MatcherFragmentCompiler;
+    matcherFragmentLoweringOptions: MatcherFragmentLoweringOptions;
   }) {
     this.projects = new PrismProjectRepository(this);
     this.tasks = new PrismTaskRepository(this);
@@ -231,6 +298,51 @@ export class PrismStore implements AppStore {
     });
   }
 
+  async ensureMatcherFragment(query: string): Promise<AdmittedMatcherFragment> {
+    const fragment = lowerMatcherQueryToPrismFragment(query, this.options.matcherFragmentLoweringOptions);
+    const cacheKey = `${fragment.fragmentId}:${fragment.sourceHash}`;
+    let pending = this.matcherFragments.get(cacheKey);
+    if (!pending) {
+      pending = this.compileAndStoreMatcherFragment(fragment);
+      this.matcherFragments.set(cacheKey, pending);
+    }
+    return await pending;
+  }
+
+  async ensureMatcherFragmentUse(input: {
+    query: string;
+    consumerKind: string;
+    consumerId: string;
+    enabled?: boolean;
+    materializationTarget?: Record<string, unknown>;
+    replacementScope?: unknown;
+  }): Promise<AdmittedMatcherFragment> {
+    const admitted = await this.ensureMatcherFragment(input.query);
+    const request: {
+      projectId: string;
+      appId: string;
+      fragmentId: string;
+      consumerKind: string;
+      consumerId: string;
+      fragmentHash: string;
+      materializationTarget?: Record<string, unknown>;
+      replacementScope?: unknown;
+      enabled: boolean;
+    } = {
+      projectId: this.options.projectId,
+      appId: "unblock",
+      fragmentId: admitted.fragmentId,
+      consumerKind: input.consumerKind,
+      consumerId: input.consumerId,
+      fragmentHash: admitted.fragmentHash,
+      enabled: input.enabled ?? true,
+    };
+    if (input.materializationTarget !== undefined) request.materializationTarget = input.materializationTarget;
+    if (input.replacementScope !== undefined) request.replacementScope = input.replacementScope;
+    await this.options.client.upsertRuntimeQueryFragmentUse(request);
+    return admitted;
+  }
+
   projectId(): string {
     return this.options.projectId;
   }
@@ -271,6 +383,35 @@ export class PrismStore implements AppStore {
       idempotencyKey,
       operations: operations.map(toSemanticOperation),
     });
+  }
+
+  private async compileAndStoreMatcherFragment(fragment: MatcherFragmentLowering): Promise<AdmittedMatcherFragment> {
+    const artifact = await this.options.fragmentCompiler.compile(fragment);
+    if (artifact.project_id !== this.options.projectId) {
+      throw new Error(`Prism matcher fragment project mismatch: artifact=${artifact.project_id} store=${this.options.projectId}`);
+    }
+    if (artifact.fragment_id !== fragment.fragmentId) {
+      throw new Error(`Prism matcher fragment id mismatch: artifact=${artifact.fragment_id} lowered=${fragment.fragmentId}`);
+    }
+    const record = await this.options.client.storeRuntimeQueryFragment({
+      projectId: this.options.projectId,
+      artifact,
+      owner: this.options.actorId,
+      sourceKind: "unblock.matcher",
+      sourceHash: fragment.sourceHash,
+    });
+    const state = record.state || artifact.state;
+    if (state !== "admitted") {
+      throw new Error(`Prism rejected matcher fragment ${fragment.fragmentId}: state=${state}`);
+    }
+    return {
+      lowering: fragment,
+      artifact,
+      fragmentId: record.fragmentId || artifact.fragment_id,
+      fragmentHash: record.fragmentHash || artifact.fragment_hash,
+      selectorHash: fragment.selectorHash,
+      sourceHash: fragment.sourceHash,
+    };
   }
 }
 
@@ -386,8 +527,101 @@ export class PrismGrpcRuntimeClient implements PrismRuntimeClient {
     return response.assignments.map(tagAssignmentFromProto);
   }
 
+  async storeRuntimeQueryFragment(input: {
+    projectId: string;
+    artifact: RuntimeQueryFragmentArtifact;
+    owner?: string;
+    sourceKind?: string;
+    sourceHash?: string;
+    budget?: Record<string, unknown>;
+  }): Promise<RuntimeQueryFragmentRecord> {
+    const response = await unary<RuntimeQueryFragmentResponse>(this.client, "StoreRuntimeQueryFragment", {
+      project_id: input.projectId,
+      artifact_json: JSON.stringify(input.artifact),
+      owner: input.owner ?? "",
+      source_kind: input.sourceKind ?? "",
+      source_hash: input.sourceHash ?? "",
+      budget_json: input.budget ? JSON.stringify(input.budget) : "",
+    });
+    return runtimeQueryFragmentRecordFromProto(response);
+  }
+
+  async upsertRuntimeQueryFragmentUse(input: {
+    projectId: string;
+    appId: string;
+    fragmentId: string;
+    consumerKind: string;
+    consumerId: string;
+    fragmentHash?: string;
+    materializationTarget?: Record<string, unknown>;
+    replacementScope?: unknown;
+    enabled?: boolean;
+  }): Promise<RuntimeQueryFragmentUseRecord> {
+    const response = await unary<RuntimeQueryFragmentUseResponse>(this.client, "UpsertRuntimeQueryFragmentUse", {
+      project_id: input.projectId,
+      app_id: input.appId,
+      fragment_id: input.fragmentId,
+      consumer_kind: input.consumerKind,
+      consumer_id: input.consumerId,
+      fragment_hash: input.fragmentHash ?? "",
+      materialization_target_json: input.materializationTarget ? JSON.stringify(input.materializationTarget) : "",
+      replacement_scope_json: input.replacementScope === undefined ? "" : JSON.stringify(input.replacementScope),
+      enabled: input.enabled ?? true,
+    });
+    return runtimeQueryFragmentUseRecordFromProto(response);
+  }
+
   close(): void {
     this.client.close();
+  }
+}
+
+export class PrismCliMatcherFragmentCompiler implements MatcherFragmentCompiler {
+  constructor(private readonly options: {
+    prismCliPath?: string;
+    baseArtifactDir?: string;
+    purpose?: string;
+    keepTemp?: boolean;
+  } = {}) {}
+
+  async compile(fragment: MatcherFragmentLowering): Promise<RuntimeQueryFragmentArtifact> {
+    const root = await mkdtemp(join(tmpdir(), "unblock-prism-fragment-"));
+    const src = join(root, "src");
+    const artifactPath = join(root, "fragment.prism.json");
+    try {
+      await mkdir(src, { recursive: true });
+      await writeFile(join(root, "prism.app.json"), `${JSON.stringify({ entrypoint: "src/app.ts" }, null, 2)}\n`);
+      await writeFile(join(src, "app.ts"), fragment.source);
+      await execFileChecked(this.prismCliPath(), [
+        "query-fragment",
+        "compile",
+        "--base-artifact-dir",
+        this.baseArtifactDir(),
+        root,
+        "--fragment-id",
+        fragment.fragmentId,
+        "--purpose",
+        this.options.purpose ?? "unblock.matcher",
+        "--out",
+        artifactPath,
+        "--json",
+      ]);
+      return JSON.parse(await readFile(artifactPath, "utf8")) as RuntimeQueryFragmentArtifact;
+    } finally {
+      if (!this.options.keepTemp) await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  private prismCliPath(): string {
+    if (this.options.prismCliPath) return this.options.prismCliPath;
+    if (process.env.UNBLOCK_PRISM_CLI) return process.env.UNBLOCK_PRISM_CLI;
+    if (process.env.PRISM_CLI) return process.env.PRISM_CLI;
+    const repoBinary = resolve(packageRoot(), "../../../prism-new2/target/debug/prism");
+    return existsSync(repoBinary) ? repoBinary : "prism";
+  }
+
+  private baseArtifactDir(): string {
+    return this.options.baseArtifactDir ?? process.env.UNBLOCK_PRISM_BASE_ARTIFACT_DIR ?? join(packageRoot(), "generated");
   }
 }
 
@@ -634,11 +868,25 @@ class PrismInstructionRepository implements InstructionRepository {
   }
 
   async create(instruction: Instruction): Promise<void> {
-    await this.store.record([objectMutation("object.create", "Instruction", instruction.id, instructionFields(instruction))]);
+    const fragment = await this.store.ensureMatcherFragmentUse({
+      query: instruction.query,
+      consumerKind: "unblock.instruction",
+      consumerId: instruction.id,
+      enabled: instruction.enabled && instruction.archivedAt === null,
+      replacementScope: [instruction.projectId, instruction.id],
+    });
+    await this.store.record([objectMutation("object.create", "Instruction", instruction.id, instructionFields(instruction, fragment))]);
   }
 
   async update(instruction: Instruction): Promise<void> {
-    await this.store.record([objectMutation("object.update", "Instruction", instruction.id, instructionFields(instruction))]);
+    const fragment = await this.store.ensureMatcherFragmentUse({
+      query: instruction.query,
+      consumerKind: "unblock.instruction",
+      consumerId: instruction.id,
+      enabled: instruction.enabled && instruction.archivedAt === null,
+      replacementScope: [instruction.projectId, instruction.id],
+    });
+    await this.store.record([objectMutation("object.update", "Instruction", instruction.id, instructionFields(instruction, fragment))]);
   }
 }
 
@@ -658,11 +906,24 @@ class PrismSavedViewRepository implements SavedViewRepository {
   }
 
   async create(view: SavedView): Promise<void> {
-    await this.store.record([objectMutation("object.create", "SavedSelector", view.id, savedSelectorFields(view, "view"))]);
+    const fragment = await this.store.ensureMatcherFragmentUse({
+      query: view.query,
+      consumerKind: "unblock.saved_view",
+      consumerId: view.id,
+      replacementScope: [view.projectId, "view", view.id],
+    });
+    await this.store.record([objectMutation("object.create", "SavedSelector", view.id, savedSelectorFields(view, "view", fragment))]);
   }
 
   async update(view: SavedView): Promise<void> {
-    await this.store.record([objectMutation("object.update", "SavedSelector", view.id, savedSelectorFields(view, "view"))]);
+    const fragment = await this.store.ensureMatcherFragmentUse({
+      query: view.query,
+      consumerKind: "unblock.saved_view",
+      consumerId: view.id,
+      enabled: view.archivedAt === null,
+      replacementScope: [view.projectId, "view", view.id],
+    });
+    await this.store.record([objectMutation("object.update", "SavedSelector", view.id, savedSelectorFields(view, "view", fragment))]);
   }
 }
 
@@ -682,11 +943,24 @@ class PrismQueueFeedRepository implements QueueFeedRepository {
   }
 
   async create(feed: QueueFeed): Promise<void> {
-    await this.store.record([objectMutation("object.create", "SavedSelector", feed.id, savedSelectorFields(feed, "feed"))]);
+    const fragment = await this.store.ensureMatcherFragmentUse({
+      query: feed.query,
+      consumerKind: "unblock.queue_feed",
+      consumerId: feed.id,
+      replacementScope: [feed.projectId, "feed", feed.id],
+    });
+    await this.store.record([objectMutation("object.create", "SavedSelector", feed.id, savedSelectorFields(feed, "feed", fragment))]);
   }
 
   async update(feed: QueueFeed): Promise<void> {
-    await this.store.record([objectMutation("object.update", "SavedSelector", feed.id, savedSelectorFields(feed, "feed"))]);
+    const fragment = await this.store.ensureMatcherFragmentUse({
+      query: feed.query,
+      consumerKind: "unblock.queue_feed",
+      consumerId: feed.id,
+      enabled: feed.archivedAt === null,
+      replacementScope: [feed.projectId, "feed", feed.id],
+    });
+    await this.store.record([objectMutation("object.update", "SavedSelector", feed.id, savedSelectorFields(feed, "feed", fragment))]);
   }
 }
 
@@ -710,8 +984,8 @@ class PrismMatcherQueryRepository implements MatcherQueryRepository {
   constructor(private readonly store: PrismStore) {}
 
   async matchTaskIds(projectId: string, query: string): Promise<string[]> {
-    const fragment = lowerMatcherQueryToPrismFragment(query);
-    const rows = await this.store.query<{ task_id: string }>(fragment.fragmentId, fragment.input(new Date(), projectId));
+    const fragment = await this.store.ensureMatcherFragment(query);
+    const rows = await this.store.query<{ task_id: string }>(fragment.fragmentId, fragment.lowering.input(new Date(), projectId));
     return [...new Set(rows.map((row) => row.task_id))].sort();
   }
 }
@@ -805,8 +1079,7 @@ function trackFields(track: Track): Record<string, unknown> {
   };
 }
 
-function instructionFields(instruction: Instruction): Record<string, unknown> {
-  const fragment = lowerMatcherQueryToPrismFragment(instruction.query);
+function instructionFields(instruction: Instruction, fragment: AdmittedMatcherFragment): Record<string, unknown> {
   return {
     id: instruction.id,
     project_id: instruction.projectId,
@@ -814,7 +1087,7 @@ function instructionFields(instruction: Instruction): Record<string, unknown> {
     selector_text: instruction.query,
     selector_hash: fragment.selectorHash,
     selector_fragment_id: fragment.fragmentId,
-    selector_fragment_hash: fragment.sourceHash,
+    selector_fragment_hash: fragment.fragmentHash,
     body: instruction.body,
     enabled: instruction.enabled,
     created_at: instruction.createdAt,
@@ -823,8 +1096,7 @@ function instructionFields(instruction: Instruction): Record<string, unknown> {
   };
 }
 
-function savedSelectorFields(selector: SavedView | QueueFeed, kind: "view" | "feed"): Record<string, unknown> {
-  const fragment = lowerMatcherQueryToPrismFragment(selector.query);
+function savedSelectorFields(selector: SavedView | QueueFeed, kind: "view" | "feed", fragment: AdmittedMatcherFragment): Record<string, unknown> {
   return {
     id: selector.id,
     project_id: selector.projectId,
@@ -833,7 +1105,7 @@ function savedSelectorFields(selector: SavedView | QueueFeed, kind: "view" | "fe
     selector_text: selector.query,
     selector_hash: fragment.selectorHash,
     selector_fragment_id: fragment.fragmentId,
-    selector_fragment_hash: fragment.sourceHash,
+    selector_fragment_hash: fragment.fragmentHash,
     created_at: selector.createdAt,
     updated_at: selector.updatedAt,
     archived_at: selector.archivedAt,
@@ -1209,6 +1481,37 @@ function tagAssignmentFromProto(input: ProtoTagAssignment): PrismTagAssignment {
   };
 }
 
+function runtimeQueryFragmentRecordFromProto(input: RuntimeQueryFragmentResponse): RuntimeQueryFragmentRecord {
+  return {
+    projectId: input.project_id,
+    appId: input.app_id,
+    fragmentId: input.fragment_id,
+    fragmentHash: input.fragment_hash,
+    baseManifestHash: input.base_manifest_hash,
+    state: input.state,
+    record: parseRecordJson(input.record_json),
+  };
+}
+
+function runtimeQueryFragmentUseRecordFromProto(input: RuntimeQueryFragmentUseResponse): RuntimeQueryFragmentUseRecord {
+  return {
+    projectId: input.project_id,
+    appId: input.app_id,
+    fragmentId: input.fragment_id,
+    consumerKind: input.consumer_kind,
+    consumerId: input.consumer_id,
+    fragmentHash: input.fragment_hash,
+    enabled: input.enabled,
+    record: parseRecordJson(input.record_json),
+  };
+}
+
+function parseRecordJson(recordJson: string): Record<string, unknown> {
+  if (!recordJson.trim()) return {};
+  const parsed = JSON.parse(recordJson) as unknown;
+  return isRecord(parsed) ? parsed : {};
+}
+
 function unary<Response>(client: RuntimeServiceClient, method: RuntimeMethod, request: Record<string, unknown>): Promise<Response> {
   return new Promise((resolve, reject) => {
     client[method](request, (error: ServiceError | null, response: Response) => {
@@ -1229,6 +1532,30 @@ function grpcEndpoint(endpoint: string): string {
 
 function defaultRuntimeProtoPath(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "../proto/prism/runtime/v1/runtime.proto");
+}
+
+function defaultMatcherFragmentLoweringOptions(): MatcherFragmentLoweringOptions {
+  return {
+    authoringImportPath: process.env.UNBLOCK_PRISM_AUTHORING_IMPORT ?? pathToFileURL(resolve(packageRoot(), "../../../prism-new2/packages/prism-authoring/mod.ts")).href,
+    appImportPath: process.env.UNBLOCK_PRISM_APP_IMPORT ?? pathToFileURL(join(packageRoot(), "src/app.ts")).href,
+  };
+}
+
+function packageRoot(): string {
+  return resolve(dirname(fileURLToPath(import.meta.url)), "..");
+}
+
+function execFileChecked(command: string, args: string[]): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    execFile(command, args, { maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (!error) {
+        resolvePromise();
+        return;
+      }
+      const details = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
+      reject(new Error(`Prism query fragment compile failed: ${error.message}${details ? `\n${details}` : ""}`));
+    });
+  });
 }
 
 function scopedKey(projectId: string, id: string): string {
@@ -1261,7 +1588,14 @@ function numberValue(value: unknown, fallback: number): number {
   return typeof value === "number" ? value : fallback;
 }
 
-type RuntimeMethod = "SubmitSemanticCommit" | "ReadMaterializedSurface" | "Query" | "ReadSubjectTags" | "FindSubjectsByTag";
+type RuntimeMethod =
+  | "SubmitSemanticCommit"
+  | "ReadMaterializedSurface"
+  | "Query"
+  | "ReadSubjectTags"
+  | "FindSubjectsByTag"
+  | "StoreRuntimeQueryFragment"
+  | "UpsertRuntimeQueryFragmentUse";
 
 type RuntimeServiceClient = Client & {
   [K in RuntimeMethod]: (request: Record<string, unknown>, callback: (error: ServiceError | null, response: never) => void) => void;
@@ -1298,6 +1632,27 @@ interface TagSubjectsResponse {
   assignments: ProtoTagAssignment[];
 }
 
+interface RuntimeQueryFragmentResponse {
+  project_id: string;
+  app_id: string;
+  fragment_id: string;
+  fragment_hash: string;
+  base_manifest_hash: string;
+  state: string;
+  record_json: string;
+}
+
+interface RuntimeQueryFragmentUseResponse {
+  project_id: string;
+  app_id: string;
+  fragment_id: string;
+  consumer_kind: string;
+  consumer_id: string;
+  fragment_hash: string;
+  enabled: boolean;
+  record_json: string;
+}
+
 interface ProtoTagAssignment {
   subject_ref: string;
   tag_id: string;
@@ -1305,6 +1660,15 @@ interface ProtoTagAssignment {
   value_present: boolean;
   value_json: string;
   origin: string;
+}
+
+interface AdmittedMatcherFragment {
+  lowering: MatcherFragmentLowering;
+  artifact: RuntimeQueryFragmentArtifact;
+  fragmentId: string;
+  fragmentHash: string;
+  selectorHash: string;
+  sourceHash: string;
 }
 
 type ProjectRow = {

@@ -7,6 +7,8 @@ service RuntimeService {
   rpc ActiveManifest(ActiveManifestRequest) returns (ActiveManifestResponse);
   rpc ExecuteCommand(ExecuteCommandRequest) returns (ExecuteCommandResponse);
   rpc SubmitSemanticCommit(SubmitSemanticCommitRequest) returns (SubmitSemanticCommitResponse);
+  rpc StoreRuntimeQueryFragment(StoreRuntimeQueryFragmentRequest) returns (RuntimeQueryFragmentResponse);
+  rpc UpsertRuntimeQueryFragmentUse(UpsertRuntimeQueryFragmentUseRequest) returns (RuntimeQueryFragmentUseResponse);
   rpc Query(QueryRequest) returns (QueryResponse);
   rpc ReadObject(ReadObjectRequest) returns (ObjectResponse);
   rpc ReadRelation(ReadRelationRequest) returns (RelationResponse);
@@ -110,6 +112,48 @@ message SubmitSemanticCommitResponse {
   uint64 elapsed_ms = 6;
   uint32 operation_count = 7;
   uint32 mutation_count = 8;
+}
+
+message StoreRuntimeQueryFragmentRequest {
+  string project_id = 1;
+  string artifact_json = 2;
+  string owner = 3;
+  string source_kind = 4;
+  string source_hash = 5;
+  string budget_json = 6;
+}
+
+message RuntimeQueryFragmentResponse {
+  string project_id = 1;
+  string app_id = 2;
+  string fragment_id = 3;
+  string fragment_hash = 4;
+  string base_manifest_hash = 5;
+  string state = 6;
+  string record_json = 7;
+}
+
+message UpsertRuntimeQueryFragmentUseRequest {
+  string project_id = 1;
+  string app_id = 2;
+  string fragment_id = 3;
+  string consumer_kind = 4;
+  string consumer_id = 5;
+  string fragment_hash = 6;
+  string materialization_target_json = 7;
+  string replacement_scope_json = 8;
+  bool enabled = 9;
+}
+
+message RuntimeQueryFragmentUseResponse {
+  string project_id = 1;
+  string app_id = 2;
+  string fragment_id = 3;
+  string consumer_kind = 4;
+  string consumer_id = 5;
+  string fragment_hash = 6;
+  bool enabled = 7;
+  string record_json = 8;
 }
 
 message Page {
@@ -697,6 +741,8 @@ message RuntimeRequest {
     WorkflowWatchRequest watch_workflow = 33;
     WorkflowEditRequest edit_workflow = 34;
     SubmitSemanticCommitRequest submit_semantic_commit = 35;
+    StoreRuntimeQueryFragmentRequest store_runtime_query_fragment = 36;
+    UpsertRuntimeQueryFragmentUseRequest upsert_runtime_query_fragment_use = 37;
   }
 }
 
@@ -730,6 +776,8 @@ message RuntimeResponse {
     WorkflowReadResponse watch_workflow = 34;
     WorkflowEditResponse edit_workflow = 35;
     SubmitSemanticCommitResponse submit_semantic_commit = 36;
+    RuntimeQueryFragmentResponse runtime_query_fragment = 37;
+    RuntimeQueryFragmentUseResponse runtime_query_fragment_use = 38;
   }
 }
 

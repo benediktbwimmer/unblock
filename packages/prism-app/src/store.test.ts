@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { lowerMatcherQueryToPrismFragment } from "./matcher-fragment.js";
-import { createPrismStore, type PrismRuntimeClient, type PrismSemanticOperation, type PrismTagAssignment } from "./store.js";
+import { lowerMatcherQueryToPrismFragment, type MatcherFragmentLowering } from "./matcher-fragment.js";
+import {
+  createPrismStore,
+  type MatcherFragmentCompiler,
+  type PrismRuntimeClient,
+  type PrismSemanticOperation,
+  type PrismTagAssignment,
+  type RuntimeQueryFragmentArtifact,
+  type RuntimeQueryFragmentRecord,
+  type RuntimeQueryFragmentUseRecord,
+} from "./store.js";
 
 class RecordingClient implements PrismRuntimeClient {
   readonly batches: Array<{
@@ -13,6 +22,8 @@ class RecordingClient implements PrismRuntimeClient {
   }> = [];
   surfaces = new Map<string, Record<string, unknown>[]>();
   tags = new Map<string, PrismTagAssignment[]>();
+  fragments: RuntimeQueryFragmentRecord[] = [];
+  fragmentUses: RuntimeQueryFragmentUseRecord[] = [];
 
   async submitSemanticCommit(batch: {
     projectId: string;
@@ -41,6 +52,65 @@ class RecordingClient implements PrismRuntimeClient {
     return [...this.tags.values()].flat().filter((tag) =>
       tag.tagId === input.tagId && (!input.valueKey || tag.valueKey === input.valueKey)
     );
+  }
+
+  async storeRuntimeQueryFragment(input: {
+    projectId: string;
+    artifact: RuntimeQueryFragmentArtifact;
+  }): Promise<RuntimeQueryFragmentRecord> {
+    const record: RuntimeQueryFragmentRecord = {
+      projectId: input.projectId,
+      appId: input.artifact.app_id,
+      fragmentId: input.artifact.fragment_id,
+      fragmentHash: input.artifact.fragment_hash,
+      baseManifestHash: input.artifact.base_manifest_hash,
+      state: input.artifact.state,
+      record: input.artifact,
+    };
+    this.fragments.push(record);
+    return record;
+  }
+
+  async upsertRuntimeQueryFragmentUse(input: {
+    projectId: string;
+    appId: string;
+    fragmentId: string;
+    consumerKind: string;
+    consumerId: string;
+    fragmentHash?: string;
+    enabled?: boolean;
+  }): Promise<RuntimeQueryFragmentUseRecord> {
+    const record: RuntimeQueryFragmentUseRecord = {
+      projectId: input.projectId,
+      appId: input.appId,
+      fragmentId: input.fragmentId,
+      consumerKind: input.consumerKind,
+      consumerId: input.consumerId,
+      fragmentHash: input.fragmentHash ?? "",
+      enabled: input.enabled ?? true,
+      record: {},
+    };
+    this.fragmentUses.push(record);
+    return record;
+  }
+}
+
+class RecordingCompiler implements MatcherFragmentCompiler {
+  readonly compiled: MatcherFragmentLowering[] = [];
+
+  async compile(fragment: MatcherFragmentLowering): Promise<RuntimeQueryFragmentArtifact> {
+    this.compiled.push(fragment);
+    return {
+      artifact_version: 1,
+      project_id: "prism",
+      app_id: "unblock",
+      fragment_id: fragment.fragmentId,
+      fragment_hash: `fragment:${fragment.sourceHash}`,
+      base_manifest_hash: "base",
+      purpose: "unblock.matcher",
+      state: "admitted",
+      supported_modes: ["projected_run", "materialize"],
+    };
   }
 }
 
@@ -130,9 +200,54 @@ describe("PrismStore", () => {
 
     const client = new RecordingClient();
     client.surfaces.set(fragment.fragmentId, [{ project_id: "P", task_id: "WORK" }]);
-    const store = createPrismStore({ client });
+    const compiler = new RecordingCompiler();
+    const store = createPrismStore({ client, fragmentCompiler: compiler });
 
     await expect(store.matcher.matchTaskIds("P", "tag = backend and depends on API depth <= 2")).resolves.toEqual(["WORK"]);
+    expect(compiler.compiled).toHaveLength(1);
+    expect(client.fragments).toHaveLength(1);
+    expect(client.fragments[0]?.fragmentId).toBe(fragment.fragmentId);
+  });
+
+  it("admits selector fragments and records fragment uses before saving instructions", async () => {
+    const client = new RecordingClient();
+    const compiler = new RecordingCompiler();
+    const store = createPrismStore({ client, fragmentCompiler: compiler });
+    const now = new Date("2026-05-13T00:00:00.000Z").toISOString();
+
+    await store.instructions.create({
+      projectId: "P",
+      id: "I",
+      name: "Backend work",
+      query: "tag = backend",
+      body: "Do the backend-specific instructions.",
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+    });
+
+    expect(client.fragments).toHaveLength(1);
+    expect(client.fragmentUses).toEqual([
+      expect.objectContaining({
+        consumerKind: "unblock.instruction",
+        consumerId: "I",
+        enabled: true,
+      }),
+    ]);
+    expect(client.batches[0]?.operations[0]).toEqual(expect.objectContaining({
+      family: "object",
+      operation: {
+        Create: expect.objectContaining({
+          object_kind: "Instruction",
+          object_id: "I",
+          fields: expect.objectContaining({
+            selector_fragment_id: client.fragments[0]?.fragmentId,
+            selector_fragment_hash: client.fragments[0]?.fragmentHash,
+          }),
+        }),
+      },
+    }));
   });
 });
 
