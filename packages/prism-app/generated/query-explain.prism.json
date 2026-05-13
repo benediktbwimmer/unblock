@@ -534,7 +534,7 @@
       "app_id": "unblock",
       "surface_id": "taskDependencyClosure",
       "kind": "view",
-      "plan_hash": "41260b21c7b68830",
+      "plan_hash": "27ec794d82b4c8b4",
       "dependencies": [
         {
           "kind": "relation",
@@ -560,6 +560,7 @@
           "derivation_id": "unblock.taskDependencyClosure",
           "direction": "forward",
           "max_depth": "64",
+          "path_count_mode": "reachability",
           "relation": "TaskDependsOnTask",
           "scope_kind": "constant",
           "scope_value": "global",
@@ -569,40 +570,9 @@
     },
     {
       "app_id": "unblock",
-      "surface_id": "explicitDependencyClosure",
-      "kind": "view",
-      "plan_hash": "a593d60b8f0b49f8",
-      "dependencies": [
-        {
-          "kind": "relation",
-          "app_id": "unblock",
-          "relation": "TaskDependsOnTask",
-          "fields": []
-        }
-      ],
-      "shard_scope": "global_control_plane",
-      "materialized": true,
-      "watchable": false,
-      "implementation": {
-        "kind": "generated",
-        "generator": "runtime_v2.graph.transitive_relation",
-        "parameters": {
-          "cycle_policy": "reject",
-          "derivation_id": "unblock.explicitDependencyClosure",
-          "direction": "forward",
-          "max_depth": "64",
-          "relation": "TaskDependsOnTask",
-          "scope_kind": "relation_field",
-          "scope_value": "project_id",
-          "sources": "[{\"relation\":\"TaskDependsOnTask\",\"direction\":\"forward\",\"scope_kind\":\"relation_field\",\"scope_value\":\"project_id\"}]"
-        }
-      }
-    },
-    {
-      "app_id": "unblock",
       "surface_id": "hierarchyClosure",
       "kind": "view",
-      "plan_hash": "5202684b78aacf67",
+      "plan_hash": "0c90ba4548c29c9b",
       "dependencies": [
         {
           "kind": "relation",
@@ -622,6 +592,7 @@
           "derivation_id": "unblock.hierarchyClosure",
           "direction": "forward",
           "max_depth": "64",
+          "path_count_mode": "reachability",
           "relation": "TaskContainsTask",
           "scope_kind": "relation_field",
           "scope_value": "project_id",
@@ -1761,7 +1732,6 @@
       "unblock::commentSummary",
       "unblock::directDependencySummary",
       "unblock::directDependentSummary",
-      "unblock::explicitDependencyClosure",
       "unblock::hierarchyClosure",
       "unblock::instructionRows",
       "unblock::instructionSelectorCatalog",

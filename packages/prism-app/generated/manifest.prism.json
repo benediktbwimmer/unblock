@@ -1,12 +1,12 @@
 {
   "manifest_version": 1,
   "project_id": "prism",
-  "manifest_hash": "05191c50619d42e1",
+  "manifest_hash": "814ccbeb3aafb8d1",
   "apps": [
     {
       "id": "unblock",
       "version": "0.3.0",
-      "app_hash": "e88022c94fa69657"
+      "app_hash": "9e743096466fd8e1"
     }
   ],
   "objects": [
@@ -5605,7 +5605,7 @@
       "app_id": "unblock",
       "id": "taskDependencyClosure",
       "version": "1",
-      "plan_hash": "41260b21c7b68830",
+      "plan_hash": "27ec794d82b4c8b4",
       "kind": "view",
       "subject": null,
       "input": [],
@@ -5717,6 +5717,7 @@
           "derivation_id": "unblock.taskDependencyClosure",
           "direction": "forward",
           "max_depth": "64",
+          "path_count_mode": "reachability",
           "relation": "TaskDependsOnTask",
           "scope_kind": "constant",
           "scope_value": "global",
@@ -5751,151 +5752,9 @@
     },
     {
       "app_id": "unblock",
-      "id": "explicitDependencyClosure",
-      "version": "1",
-      "plan_hash": "a593d60b8f0b49f8",
-      "kind": "view",
-      "subject": null,
-      "input": [],
-      "output": {
-        "kind": "rows",
-        "fields": [
-          {
-            "name": "scope_key",
-            "ty": {
-              "kind": "text"
-            },
-            "nullable": false,
-            "derived_by": null,
-            "indexed": false
-          },
-          {
-            "name": "from_kind",
-            "ty": {
-              "kind": "text"
-            },
-            "nullable": false,
-            "derived_by": null,
-            "indexed": false
-          },
-          {
-            "name": "from_id",
-            "ty": {
-              "kind": "text"
-            },
-            "nullable": false,
-            "derived_by": null,
-            "indexed": false
-          },
-          {
-            "name": "to_kind",
-            "ty": {
-              "kind": "text"
-            },
-            "nullable": false,
-            "derived_by": null,
-            "indexed": false
-          },
-          {
-            "name": "to_id",
-            "ty": {
-              "kind": "text"
-            },
-            "nullable": false,
-            "derived_by": null,
-            "indexed": false
-          },
-          {
-            "name": "min_depth",
-            "ty": {
-              "kind": "i32"
-            },
-            "nullable": false,
-            "derived_by": null,
-            "indexed": false
-          },
-          {
-            "name": "path_count",
-            "ty": {
-              "kind": "i64"
-            },
-            "nullable": false,
-            "derived_by": null,
-            "indexed": false
-          }
-        ],
-        "identity": {
-          "parts": [
-            {
-              "kind": "field",
-              "field": "scope_key"
-            },
-            {
-              "kind": "field",
-              "field": "from_kind"
-            },
-            {
-              "kind": "field",
-              "field": "from_id"
-            },
-            {
-              "kind": "field",
-              "field": "to_kind"
-            },
-            {
-              "kind": "field",
-              "field": "to_id"
-            }
-          ]
-        },
-        "replacement_scope": {
-          "parts": [
-            {
-              "kind": "field",
-              "field": "scope_key"
-            }
-          ]
-        }
-      },
-      "implementation": {
-        "kind": "generated",
-        "generator": "runtime_v2.graph.transitive_relation",
-        "parameters": {
-          "cycle_policy": "reject",
-          "derivation_id": "unblock.explicitDependencyClosure",
-          "direction": "forward",
-          "max_depth": "64",
-          "relation": "TaskDependsOnTask",
-          "scope_kind": "relation_field",
-          "scope_value": "project_id",
-          "sources": "[{\"relation\":\"TaskDependsOnTask\",\"direction\":\"forward\",\"scope_kind\":\"relation_field\",\"scope_value\":\"project_id\"}]"
-        }
-      },
-      "dependencies": [
-        {
-          "kind": "relation",
-          "app_id": "unblock",
-          "relation": "TaskDependsOnTask",
-          "fields": []
-        }
-      ],
-      "shard_scope": "global_control_plane",
-      "determinism": "deterministic",
-      "materialization": {
-        "posture": "daemon",
-        "max_rows_per_run": null,
-        "stale_after_ms": null
-      },
-      "watch": null,
-      "temporal_dependencies": [],
-      "temporal_wakeups": [],
-      "migration_policy": "migrate_if_compatible"
-    },
-    {
-      "app_id": "unblock",
       "id": "hierarchyClosure",
       "version": "1",
-      "plan_hash": "5202684b78aacf67",
+      "plan_hash": "0c90ba4548c29c9b",
       "kind": "view",
       "subject": null,
       "input": [],
@@ -6007,6 +5866,7 @@
           "derivation_id": "unblock.hierarchyClosure",
           "direction": "forward",
           "max_depth": "64",
+          "path_count_mode": "reachability",
           "relation": "TaskContainsTask",
           "scope_kind": "relation_field",
           "scope_value": "project_id",
@@ -16993,9 +16853,6 @@
         "relation:unblock:TaskDependsOnTask:",
         "relation:unblock:TaskDependsOnTask:from_id,project_id,to_id"
       ],
-      "unblock::explicitDependencyClosure": [
-        "relation:unblock:TaskDependsOnTask:"
-      ],
       "unblock::hierarchyClosure": [
         "relation:unblock:TaskContainsTask:"
       ],
@@ -17214,7 +17071,6 @@
       "relation:unblock:TaskDependsOnTask:": [
         "unblock::taskDependencyRows",
         "unblock::taskDependencyClosure",
-        "unblock::explicitDependencyClosure",
         "unblock::directDependencySummary",
         "unblock::directDependentSummary",
         "unblock::unfinishedDirectDependencySummary"
@@ -17308,7 +17164,6 @@
         "unblock::commentSummary",
         "unblock::directDependencySummary",
         "unblock::directDependentSummary",
-        "unblock::explicitDependencyClosure",
         "unblock::hierarchyClosure",
         "unblock::instructionRows",
         "unblock::instructionSelectorCatalog",
@@ -17538,12 +17393,12 @@
     {
       "kind": "schema_ir",
       "path": "schema.prism.json",
-      "hash": "bbdf1d1d629a0c87"
+      "hash": "a3510ee0d63a3e64"
     },
     {
       "kind": "desired_sql",
       "path": "desired_schema.sql",
-      "hash": "e4a9121b23489cd7"
+      "hash": "4ffe0de6392bf4e8"
     },
     {
       "kind": "type_script_metadata",
@@ -17558,7 +17413,7 @@
     {
       "kind": "type_script_metadata",
       "path": "typescript/app-sdk.ts",
-      "hash": "21bf3bc4b24743b2"
+      "hash": "71dd6b02867a908c"
     },
     {
       "kind": "type_script_metadata",
@@ -17573,17 +17428,17 @@
     {
       "kind": "runtime_metadata",
       "path": "sdk.prism.json",
-      "hash": "4cd8874fded369b7"
+      "hash": "ca97648060a02398"
     },
     {
       "kind": "runtime_metadata",
       "path": "query-explain.prism.json",
-      "hash": "0f426a5efd3a7281"
+      "hash": "b4131c02ba1c1bb7"
     },
     {
       "kind": "runtime_metadata",
       "path": "benchmark.prism.json",
-      "hash": "7bb3b23dbe1f3675"
+      "hash": "4708b7db2c94d773"
     }
   ],
   "required_features": [

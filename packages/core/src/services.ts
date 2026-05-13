@@ -511,6 +511,50 @@ export class DependencyService {
     return dependency;
   }
 
+  async addMany(inputs: Array<{ taskId: string; dependsOnTaskId: string }>): Promise<Dependency[]> {
+    const createdAt = nowIso();
+    const requested = inputs.map((input) => ({
+      projectId: this.projectId,
+      taskId: normalizeId(input.taskId),
+      dependsOnTaskId: normalizeId(input.dependsOnTaskId),
+      createdAt
+    }));
+    const unique = new Map<string, Dependency>();
+    for (const dependency of requested) {
+      unique.set(dependencyKey(dependency.taskId, dependency.dependsOnTaskId), dependency);
+    }
+    const dependencies = [...unique.values()];
+    if (dependencies.length === 0) return [];
+
+    const added: Dependency[] = [];
+    await this.store.transaction(async (repos) => {
+      const tasks = await repos.tasks.list(this.projectId);
+      const taskById = new Map(tasks.map((task) => [task.id, task]));
+      const existing = await repos.dependencies.list(this.projectId);
+      const existingKeys = new Set(existing.map((edge) => dependencyKey(edge.taskId, edge.dependsOnTaskId)));
+      const candidates = dependencies.filter((dependency) => !existingKeys.has(dependencyKey(dependency.taskId, dependency.dependsOnTaskId)));
+      for (const dependency of candidates) {
+        const task = taskById.get(dependency.taskId) ?? notFound("task", dependency.taskId);
+        const dependencyTask = taskById.get(dependency.dependsOnTaskId) ?? notFound("task", dependency.dependsOnTaskId);
+        if (task.archivedAt) {
+          validation("Archived tasks cannot receive new dependencies in V1.", { taskId: task.id });
+        }
+        if (dependencyTask.archivedAt) {
+          validation("Archived tasks cannot be dependencies in V1.", { dependsOnTaskId: dependencyTask.id });
+        }
+      }
+      validateDependencyGraph(tasks, [...existing, ...candidates]);
+      for (const dependency of candidates) {
+        await repos.dependencies.add(dependency);
+      }
+      if (candidates.length > 0) {
+        await repos.activity.append(this.activity.make(this.projectId, "dependency.batch_added", "project", this.projectId, `Added ${candidates.length} dependencies`, { count: candidates.length }));
+      }
+      added.push(...candidates);
+    });
+    return added;
+  }
+
   async remove(taskIdInput: string, dependsOnTaskIdInput: string): Promise<void> {
     const taskId = normalizeId(taskIdInput);
     const dependsOnTaskId = normalizeId(dependsOnTaskIdInput);
@@ -715,6 +759,46 @@ export class TagService {
         await repos.tags.addTaskTag({ projectId: this.projectId, taskId, tagId: tag.id, createdAt });
       }
       await repos.activity.append(this.activity.make(this.projectId, "tag.assigned", "task", taskId, `Assigned tags to ${taskId}`, { tags: tagIdsOrNames }));
+    });
+  }
+
+  async assignMany(inputs: Array<{ taskId: string; tagIdsOrNames: string[] }>): Promise<void> {
+    const createdAt = nowIso();
+    const normalized = inputs
+      .map((input) => ({
+        taskId: normalizeId(input.taskId),
+        tagIdsOrNames: input.tagIdsOrNames.filter((tag) => tag.trim().length > 0),
+      }))
+      .filter((input) => input.tagIdsOrNames.length > 0);
+    if (normalized.length === 0) return;
+
+    await this.store.transaction(async (repos) => {
+      const tasks = await repos.tasks.list(this.projectId);
+      const taskIds = new Set(tasks.map((task) => task.id));
+      const tags = await repos.tags.list(this.projectId);
+      const tagsById = new Map(tags.map((tag) => [tag.id, tag]));
+      const tagsByName = new Map(tags.map((tag) => [tag.name, tag]));
+      const assigned = new Set<string>();
+      let assignmentCount = 0;
+
+      for (const input of normalized) {
+        if (!taskIds.has(input.taskId)) {
+          notFound("task", input.taskId);
+        }
+        for (const tagIdOrName of input.tagIdsOrNames) {
+          const tag = tagsById.get(normalizeId(tagIdOrName)) ?? tagsByName.get(tagIdOrName) ?? notFound("tag", tagIdOrName);
+          if (tag.archivedAt) {
+            validation("Archived tags cannot be assigned.", { tagId: tag.id });
+          }
+          const key = `${input.taskId}\0${tag.id}`;
+          if (assigned.has(key)) continue;
+          assigned.add(key);
+          assignmentCount += 1;
+          await repos.tags.addTaskTag({ projectId: this.projectId, taskId: input.taskId, tagId: tag.id, createdAt });
+        }
+      }
+
+      await repos.activity.append(this.activity.make(this.projectId, "tag.batch_assigned", "project", this.projectId, `Assigned ${assignmentCount} task tags`, { count: assignmentCount }));
     });
   }
 
@@ -1203,7 +1287,11 @@ export class QueryService {
   }
 
   async list(filters: TaskListFilters = {}): Promise<TaskView[]> {
-    const [tasks, dependencies, comments, tags, taskTags, tracks, assignments] = await Promise.all([
+    const where = filters.where?.trim();
+    const nativeTaskIds = where && this.store.matcher
+      ? new Set(await this.store.matcher.matchTaskIds(this.projectId, where, (({ where: _where, ...baseFilters }) => baseFilters)(filters)))
+      : null;
+    const [allTasks, dependencies, comments, tags, taskTags, tracks, assignments] = await Promise.all([
       this.store.tasks.list(this.projectId),
       this.store.dependencies.list(this.projectId),
       this.store.comments.list(this.projectId),
@@ -1213,14 +1301,15 @@ export class QueryService {
       this.store.tracks.listAssignments(this.projectId)
     ]);
 
-    const taskById = new Map(tasks.map((task) => [task.id, task]));
+    const tasks = nativeTaskIds ? allTasks.filter((task) => nativeTaskIds.has(task.id)) : allTasks;
+    const taskById = new Map(allTasks.map((task) => [task.id, task]));
     const tagById = new Map(tags.map((tag) => [tag.id, tag]));
     const trackById = new Map(tracks.map((track) => [track.id, track]));
-    const activeTaskIds = new Set(tasks.filter((task) => !task.archivedAt).map((task) => task.id));
+    const activeTaskIds = new Set(allTasks.filter((task) => !task.archivedAt).map((task) => task.id));
     const activeDependencies = dependencies.filter((dependency) => activeTaskIds.has(dependency.taskId) && activeTaskIds.has(dependency.dependsOnTaskId));
     const graph = buildGraphIndexes(activeDependencies);
-    const depths = computeDepths(tasks.filter((task) => !task.archivedAt), activeDependencies);
-    const transitiveDependents = computeTransitiveDependents(tasks.filter((task) => !task.archivedAt && task.lifecycle !== "finished"), activeDependencies);
+    const depths = computeDepths(allTasks.filter((task) => !task.archivedAt), activeDependencies);
+    const transitiveDependents = computeTransitiveDependents(allTasks.filter((task) => !task.archivedAt && task.lifecycle !== "finished"), activeDependencies);
 
     const tagsByTask = new Map<string, Tag[]>();
     for (const taskTag of taskTags) {
@@ -1307,8 +1396,21 @@ export class QueryService {
       };
     });
 
-    const statusByTask = new Map(views.map((task) => [task.id, task.computedStatus]));
-    const rollups = computeHierarchyRollups(tasks, statusByTask);
+    const statusByTask = new Map(allTasks.map((task) => {
+      const dependencyIds = graph.dependenciesByTask.get(task.id) ?? [];
+      const blocked = task.lifecycle !== "finished" && dependencyIds.some((dependencyId) => taskById.get(dependencyId)?.lifecycle !== "finished");
+      const computedStatus = task.archivedAt
+        ? "archived"
+        : task.lifecycle === "finished"
+          ? "finished"
+          : task.lifecycle === "started"
+            ? "started"
+            : blocked
+              ? "blocked"
+              : "ready";
+      return [task.id, computedStatus] as const;
+    }));
+    const rollups = computeHierarchyRollups(allTasks, statusByTask);
     views = views.map((task) => {
       const parentTask = task.parentTaskId ? taskById.get(task.parentTaskId) : null;
       const rollup = rollups.get(task.id);
@@ -1333,7 +1435,7 @@ export class QueryService {
         unfinishedDescendantsCount
       };
     });
-    const hierarchy = buildHierarchyIndexes(tasks.filter((task) => !task.archivedAt));
+    const hierarchy = buildHierarchyIndexes(allTasks.filter((task) => !task.archivedAt));
     const viewById = new Map(views.map((task) => [task.id, task]));
     views = views.map((task) => ({
       ...task,
@@ -1343,12 +1445,8 @@ export class QueryService {
     }));
 
     views = this.applyFilters(views, filters);
-    if (filters.where?.trim()) {
-      const { where: _where, ...baseFilters } = filters;
-      const nativeTaskIds = this.store.matcher
-        ? await this.store.matcher.matchTaskIds(this.projectId, filters.where, baseFilters)
-        : null;
-      const queryMatches = new Set(nativeTaskIds ?? matchMatcherQuery(filters.where, views, activeDependencies).map((match) => match.task.id));
+    if (where && !nativeTaskIds) {
+      const queryMatches = new Set(matchMatcherQuery(where, views, activeDependencies).map((match) => match.task.id));
       views = views.filter((task) => queryMatches.has(task.id));
     }
     return sortTaskViews(views, filters.sort);

@@ -8,6 +8,7 @@
     "sourceMap": true
   },
   "include": [
-    "src/store.ts"
+    "src/store.ts",
+    "src/workload-runner.ts"
   ]
 }

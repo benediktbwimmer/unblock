@@ -27,8 +27,10 @@ export interface MatcherFragmentLowering {
 
 interface JoinSpec {
   importName: "taskLabelRows" | "taskDependencyClosure" | "hierarchyClosure" | "commentRows";
-  on(index: number): string;
+  on(index: number, right: string): string;
 }
+
+type BaseSurface = "taskRows" | "taskReadModel" | "taskCommentMatcherModel" | "taskAssignmentMatcherModel" | "taskMatcherReadModel";
 
 interface LowerContext {
   joins: JoinSpec[];
@@ -52,15 +54,15 @@ export function lowerMatcherQueryToPrismFragment(query: string, options: Matcher
       const index = this.joins.length;
       this.joins.push({
         importName: "taskLabelRows",
-        on: (joinIndex) => {
+        on: (joinIndex, label) => {
           const task = taskPathForJoin(joinIndex);
           const labelMatches = normalizedValues
             .map((value) =>
-              `label.label_id.toLowerCase() === ${literal(value)} || label.name.toLowerCase() === ${literal(value)}`
+              `${label}.label_id.toLowerCase() === ${literal(value)} || ${label}.name.toLowerCase() === ${literal(value)}`
             )
             .join(" || ");
           const predicate = mode === "in" ? `(${labelMatches})` : `!(${labelMatches})`;
-          return `${task}.id === label.task_id && ${task}.project_id === label.project_id && ${predicate}`;
+          return `${task}.id === ${label}.task_id && ${task}.project_id === ${label}.project_id && ${predicate}`;
         },
       });
       return joinToken(index);
@@ -70,12 +72,12 @@ export function lowerMatcherQueryToPrismFragment(query: string, options: Matcher
       const targetId = predicate.targetId ?? "";
       this.joins.push({
         importName: "taskDependencyClosure",
-        on: (joinIndex) => {
+        on: (joinIndex, edge) => {
           const task = taskPathForJoin(joinIndex);
           if (predicate.verb === "depends on") {
-            return `${task}.id === edge.from_id && ${task}.project_id === edge.scope_key && edge.to_id === ${literal(targetId)}`;
+            return `${task}.id === ${edge}.from_id && ${task}.project_id === ${edge}.scope_key && ${edge}.to_id === ${literal(targetId)}`;
           }
-          return `${task}.id === edge.to_id && ${task}.project_id === edge.scope_key && edge.from_id === ${literal(targetId)}`;
+          return `${task}.id === ${edge}.to_id && ${task}.project_id === ${edge}.scope_key && ${edge}.from_id === ${literal(targetId)}`;
         },
       });
       return joinToken(index);
@@ -84,9 +86,9 @@ export function lowerMatcherQueryToPrismFragment(query: string, options: Matcher
       const index = this.joins.length;
       this.joins.push({
         importName: "hierarchyClosure",
-        on: (joinIndex) => {
+        on: (joinIndex, edge) => {
           const task = taskPathForJoin(joinIndex);
-          return `${task}.id === edge.to_id && ${task}.project_id === edge.scope_key && edge.from_id === ${literal(predicate.taskId)}`;
+          return `${task}.id === ${edge}.to_id && ${task}.project_id === ${edge}.scope_key && ${edge}.from_id === ${literal(predicate.taskId)}`;
         },
       });
       return joinToken(index);
@@ -96,9 +98,9 @@ export function lowerMatcherQueryToPrismFragment(query: string, options: Matcher
       const expected = value.toLowerCase();
       this.joins.push({
         importName: "commentRows",
-        on: (joinIndex) => {
+        on: (joinIndex, comment) => {
           const task = taskPathForJoin(joinIndex);
-          return `${task}.id === comment.task_id && ${task}.project_id === comment.project_id && comment.archived_at === null && (comment.machine + ":" + comment.actor).toLowerCase() === ${literal(expected)}`;
+          return `${task}.id === ${comment}.task_id && ${task}.project_id === ${comment}.project_id && ${comment}.archived_at === null && (${comment}.machine + ":" + ${comment}.actor).toLowerCase() === ${literal(expected)}`;
         },
       });
       return joinToken(index);
@@ -113,6 +115,7 @@ export function lowerMatcherQueryToPrismFragment(query: string, options: Matcher
   const totalJoins = context.joins.length;
   const task = baseTaskPath(totalJoins);
   const predicate = replaceJoinTokens(rawPredicate, totalJoins).replaceAll("__TASK__", task);
+  const baseSurface = baseSurfaceForQuery(ast);
   const authoringImportPath = options.authoringImportPath ?? "../../../../prism-new2/packages/prism-authoring/mod.ts";
   const appImportPath = options.appImportPath ?? "../src/app.ts";
   const inputSchemaFields = ["project_id: z.string()", ...context.times.flatMap((time, index) =>
@@ -120,7 +123,7 @@ export function lowerMatcherQueryToPrismFragment(query: string, options: Matcher
       ? [`t${index}_start: z.string().datetime()`, `t${index}_end: z.string().datetime()`]
       : [`t${index}_start: z.string().datetime()`]
   )];
-  const sourceImports = [...new Set(["taskMatcherReadModel", ...context.joins.map((join) => join.importName)])];
+  const sourceImports = [...new Set([baseSurface, ...context.joins.map((join) => join.importName)])];
   const source = [
     `import { z } from ${literal(authoringImportPath)};`,
     `import { Unblock, ${sourceImports.join(", ")} } from ${literal(appImportPath)};`,
@@ -131,9 +134,9 @@ export function lowerMatcherQueryToPrismFragment(query: string, options: Matcher
     "    project_id: z.string(),",
     "    task_id: z.string(),",
     "  }))",
-    "  .from(taskMatcherReadModel)",
+    `  .from(${baseSurface})`,
     ...context.joins.map((join, index) =>
-      `  .leftJoin(${join.importName}, (${leftArg(index)}: any, ${rightArg(join.importName)}: any) => ${join.on(index)})`
+      `  .leftJoin(${join.importName}, (${leftArg(index)}: any, ${rightArg(join.importName)}: any) => ${join.on(index, rightArg(join.importName))})`
     ),
     `  .where((row: any, input: any) => ${task}.project_id === input.project_id && ${task}.archived_at === null && (${predicate}))`,
     "  .select((row: any) => ({",
@@ -160,6 +163,60 @@ export function lowerMatcherQueryToPrismFragment(query: string, options: Matcher
       };
     },
   };
+}
+
+function baseSurfaceForQuery(node: QueryNode): BaseSurface {
+  let rank = 0;
+  const visit = (item: QueryNode): void => {
+    switch (item.type) {
+      case "and":
+      case "or":
+        item.nodes.forEach(visit);
+        return;
+      case "not":
+        visit(item.node);
+        return;
+      case "field":
+        rank = Math.max(rank, baseSurfaceRankForField(item));
+        return;
+      case "comment":
+        rank = Math.max(rank, item.relation === "since" ? 2 : 0);
+        return;
+      case "graph":
+        rank = Math.max(rank, item.targetId ? 0 : 4);
+        return;
+      case "hierarchy":
+      case "time":
+        return;
+    }
+  };
+  visit(node);
+  return baseSurfaceForRank(rank);
+}
+
+function baseSurfaceRankForField(predicate: FieldPredicate): number {
+  switch (predicate.field) {
+    case "status":
+      return 1;
+    case "comments":
+      return 2;
+    case "assigned":
+    case "machine":
+    case "actor":
+      return 3;
+    case "parent":
+      return 4;
+    default:
+      return 0;
+  }
+}
+
+function baseSurfaceForRank(rank: number): BaseSurface {
+  if (rank >= 4) return "taskMatcherReadModel";
+  if (rank === 3) return "taskAssignmentMatcherModel";
+  if (rank === 2) return "taskCommentMatcherModel";
+  if (rank === 1) return "taskReadModel";
+  return "taskRows";
 }
 
 function lowerNode(node: QueryNode, task: string, context: LowerContext): string {
@@ -331,10 +388,8 @@ function leftArg(index: number): string {
   return index === 0 ? "left" : "left";
 }
 
-function rightArg(importName: JoinSpec["importName"]): string {
-  if (importName === "taskLabelRows") return "label";
-  if (importName === "commentRows") return "comment";
-  return "edge";
+function rightArg(_importName: JoinSpec["importName"]): string {
+  return "right";
 }
 
 function expressionHasEnd(expression: TimeExpression): boolean {

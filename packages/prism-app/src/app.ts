@@ -550,20 +550,14 @@ export const taskDependencyClosure = TaskDependsOnTask.transitive(
       { relation: TaskContainsTask, scopeField: "project_id" },
     ],
     maxDepth: 64,
-  },
-);
-
-export const explicitDependencyClosure = TaskDependsOnTask.transitive(
-  "explicitDependencyClosure",
-  {
-    scopeField: "project_id",
-    maxDepth: 64,
+    countPaths: false,
   },
 );
 
 export const hierarchyClosure = TaskContainsTask.transitive("hierarchyClosure", {
   scopeField: "project_id",
   maxDepth: 64,
+  countPaths: false,
 });
 
 export const directDependencySummary = Unblock.surface.view("directDependencySummary")

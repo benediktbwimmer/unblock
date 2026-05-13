@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "project_id": "prism",
-  "manifest_hash": "05191c50619d42e1",
+  "manifest_hash": "814ccbeb3aafb8d1",
   "runtime_protocol": {
     "kind": "protobuf_grpc",
     "package": "prism.runtime.v1",
@@ -2155,113 +2155,6 @@
     {
       "app_id": "unblock",
       "id": "taskDependencyClosure",
-      "kind": "view",
-      "input": [],
-      "output": {
-        "kind": "rows",
-        "fields": [
-          {
-            "name": "scope_key",
-            "ty": {
-              "kind": "text"
-            },
-            "nullable": false,
-            "derived_by": null,
-            "indexed": false
-          },
-          {
-            "name": "from_kind",
-            "ty": {
-              "kind": "text"
-            },
-            "nullable": false,
-            "derived_by": null,
-            "indexed": false
-          },
-          {
-            "name": "from_id",
-            "ty": {
-              "kind": "text"
-            },
-            "nullable": false,
-            "derived_by": null,
-            "indexed": false
-          },
-          {
-            "name": "to_kind",
-            "ty": {
-              "kind": "text"
-            },
-            "nullable": false,
-            "derived_by": null,
-            "indexed": false
-          },
-          {
-            "name": "to_id",
-            "ty": {
-              "kind": "text"
-            },
-            "nullable": false,
-            "derived_by": null,
-            "indexed": false
-          },
-          {
-            "name": "min_depth",
-            "ty": {
-              "kind": "i32"
-            },
-            "nullable": false,
-            "derived_by": null,
-            "indexed": false
-          },
-          {
-            "name": "path_count",
-            "ty": {
-              "kind": "i64"
-            },
-            "nullable": false,
-            "derived_by": null,
-            "indexed": false
-          }
-        ],
-        "identity": {
-          "parts": [
-            {
-              "kind": "field",
-              "field": "scope_key"
-            },
-            {
-              "kind": "field",
-              "field": "from_kind"
-            },
-            {
-              "kind": "field",
-              "field": "from_id"
-            },
-            {
-              "kind": "field",
-              "field": "to_kind"
-            },
-            {
-              "kind": "field",
-              "field": "to_id"
-            }
-          ]
-        },
-        "replacement_scope": {
-          "parts": [
-            {
-              "kind": "field",
-              "field": "scope_key"
-            }
-          ]
-        }
-      },
-      "watchable": false
-    },
-    {
-      "app_id": "unblock",
-      "id": "explicitDependencyClosure",
       "kind": "view",
       "input": [],
       "output": {

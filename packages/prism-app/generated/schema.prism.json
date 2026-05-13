@@ -171,15 +171,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "title",
                 "ty": {
                   "kind": "text"
@@ -465,15 +456,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "machine",
                 "ty": {
                   "kind": "text"
@@ -608,15 +590,6 @@
               },
               {
                 "name": "id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -780,15 +753,6 @@
               },
               {
                 "name": "id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -987,15 +951,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "kind",
                 "ty": {
                   "kind": "enum",
@@ -1175,15 +1130,6 @@
               },
               {
                 "name": "id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -1387,15 +1333,6 @@
                   "kind": "text"
                 },
                 "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": true,
                 "default_sql": null,
                 "generated": false
               },
@@ -1607,15 +1544,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "created_at",
                 "ty": {
                   "kind": "timestamp"
@@ -1726,15 +1654,6 @@
               },
               {
                 "name": "to_task_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -1862,15 +1781,6 @@
               },
               {
                 "name": "to_track_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -2007,15 +1917,6 @@
               },
               {
                 "name": "to_externalissue_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -2487,15 +2388,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "title",
                 "ty": {
                   "kind": "text"
@@ -2698,15 +2590,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "task_id",
                 "ty": {
                   "kind": "text"
@@ -2806,15 +2689,6 @@
               },
               {
                 "name": "id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -2930,15 +2804,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "machine",
                 "ty": {
                   "kind": "text"
@@ -3029,15 +2894,6 @@
               },
               {
                 "name": "id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -3153,15 +3009,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "kind",
                 "ty": {
                   "kind": "enum",
@@ -3262,15 +3109,6 @@
                   "kind": "text"
                 },
                 "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": true,
                 "default_sql": null,
                 "generated": false
               },
@@ -3397,15 +3235,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "task_id",
                 "ty": {
                   "kind": "text"
@@ -3460,15 +3289,6 @@
               },
               {
                 "name": "shard_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -3548,15 +3368,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "task_id",
                 "ty": {
                   "kind": "text"
@@ -3608,104 +3419,6 @@
           "semantic_id": "unblock.surface.taskDependencyClosure",
           "table": {
             "name": "surface_taskdependencyclosure",
-            "columns": [
-              {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "shard_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "scope_key",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "from_kind",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "from_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "to_kind",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "to_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "min_depth",
-                "ty": {
-                  "kind": "i32"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "path_count",
-                "ty": {
-                  "kind": "i64"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              }
-            ],
-            "primary_key": [
-              "project_id",
-              "shard_id"
-            ],
-            "indexes": [],
-            "checks": []
-          },
-          "materialized": true
-        },
-        {
-          "app_id": "unblock",
-          "name": "explicitDependencyClosure",
-          "semantic_id": "unblock.surface.explicitDependencyClosure",
-          "table": {
-            "name": "surface_explicitdependencyclosure",
             "columns": [
               {
                 "name": "project_id",
@@ -3931,15 +3644,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "direct_dependency_count",
                 "ty": {
                   "kind": "i64"
@@ -3997,15 +3701,6 @@
               },
               {
                 "name": "task_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -4079,15 +3774,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "unfinished_dependency_count",
                 "ty": {
                   "kind": "i64"
@@ -4145,15 +3831,6 @@
               },
               {
                 "name": "task_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -4227,15 +3904,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "unblocks_count",
                 "ty": {
                   "kind": "i64"
@@ -4293,15 +3961,6 @@
               },
               {
                 "name": "task_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -4375,15 +4034,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "descendants_count",
                 "ty": {
                   "kind": "i64"
@@ -4441,15 +4091,6 @@
               },
               {
                 "name": "task_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -4523,15 +4164,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "parent_task_id",
                 "ty": {
                   "kind": "text"
@@ -4586,15 +4218,6 @@
               },
               {
                 "name": "task_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -4669,15 +4292,6 @@
               },
               {
                 "name": "task_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -4784,15 +4398,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "computed_status",
                 "ty": {
                   "kind": "enum",
@@ -4881,15 +4486,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "descendants_count",
                 "ty": {
                   "kind": "i64"
@@ -4959,15 +4555,6 @@
               },
               {
                 "name": "id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -5223,15 +4810,6 @@
               },
               {
                 "name": "id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -5517,15 +5095,6 @@
               },
               {
                 "name": "id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -5856,15 +5425,6 @@
               },
               {
                 "name": "id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -6287,15 +5847,6 @@
                 "generated": false
               },
               {
-                "name": "project_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
                 "name": "priority",
                 "ty": {
                   "kind": "i32"
@@ -6341,15 +5892,6 @@
               },
               {
                 "name": "shard_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -6439,15 +5981,6 @@
               },
               {
                 "name": "shard_id",
-                "ty": {
-                  "kind": "text"
-                },
-                "nullable": false,
-                "default_sql": null,
-                "generated": false
-              },
-              {
-                "name": "project_id",
                 "ty": {
                   "kind": "text"
                 },
@@ -7232,5 +6765,5 @@
       }
     ]
   },
-  "generated_at_manifest_hash": "cea699dc8a7eb8ee"
+  "generated_at_manifest_hash": "d9412c3e4bee6205"
 }

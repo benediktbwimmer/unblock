@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -227,7 +228,7 @@ export class PrismStore implements AppStore {
   readonly migrations: MigrationRepository;
   readonly matcher: MatcherQueryRepository;
 
-  private pending: PrismMutation[] | null = null;
+  private readonly transactionOperations = new AsyncLocalStorage<PrismMutation[]>();
   private readonly matcherFragments = new Map<string, Promise<AdmittedMatcherFragment>>();
 
   constructor(private readonly options: {
@@ -253,37 +254,27 @@ export class PrismStore implements AppStore {
   }
 
   async transaction<T>(fn: (repos: RepositorySet) => Promise<T>): Promise<T> {
-    if (this.pending) return await fn(this);
-    const previous = this.pending;
+    if (this.transactionOperations.getStore()) return await fn(this);
     const operations: PrismMutation[] = [];
-    this.pending = operations;
-    try {
+    return await this.transactionOperations.run(operations, async () => {
       const result = await fn(this);
       await this.flush(operations, `tx:${hashJson(operations)}`);
       return result;
-    } finally {
-      this.pending = previous;
-    }
+    });
   }
 
   async record(operations: PrismMutation[], idempotencyKey = `op:${hashJson(operations)}`): Promise<void> {
     if (operations.length === 0) return;
-    if (this.pending) {
-      this.pending.push(...operations);
+    const pending = this.transactionOperations.getStore();
+    if (pending) {
+      pending.push(...operations);
       return;
     }
     await this.flush(operations, idempotencyKey);
   }
 
   async rows<T extends Record<string, unknown>>(surfaceId: string): Promise<T[]> {
-    return await this.options.client.readMaterializedSurface<T>({
-      projectId: this.options.projectId,
-      shardId: this.options.shardId,
-      appId: "unblock",
-      surfaceId,
-      limit: 10_000,
-      offset: 0,
-    });
+    return await this.query<T>(surfaceId);
   }
 
   async query<T extends Record<string, unknown>>(surfaceId: string, input: Record<string, unknown> = {}): Promise<T[]> {

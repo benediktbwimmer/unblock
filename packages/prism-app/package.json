@@ -21,7 +21,8 @@
     "collect": "deno run --allow-read --allow-env ../../../prism-new2/packages/prism-authoring/collector.ts .",
     "compile": "cd ../../../prism-new2 && cargo run -p prism-cli --bin prism -- compile ../unblock/packages/prism-app -o ../unblock/packages/prism-app/generated",
     "check": "deno check src/app.ts && tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "bench:runtime": "tsx src/workload-runner.ts"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.3",
