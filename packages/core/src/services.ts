@@ -1030,6 +1030,60 @@ export class InstructionService {
     return instruction;
   }
 
+  async addMany(inputs: AddInstructionInput[]): Promise<Instruction[]> {
+    const now = nowIso();
+    const instructions = inputs.map((input) => {
+      const errors = validateMatcherQuery(input.query);
+      if (errors.length > 0) {
+        validation("Instruction matcher is invalid.", { errors });
+      }
+      const instruction: Instruction = {
+        projectId: this.projectId,
+        id: input.id ? normalizeId(input.id) : normalizeId(slugify(input.name)),
+        name: input.name.trim(),
+        query: input.query.trim(),
+        body: input.body,
+        enabled: input.enabled ?? true,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null
+      };
+      if (!instruction.name) {
+        validation("Instruction name is required.");
+      }
+      return instruction;
+    });
+    const seenIds = new Set<string>();
+    const seenNames = new Set<string>();
+    for (const instruction of instructions) {
+      if (seenIds.has(instruction.id)) conflict(`Instruction already exists: ${instruction.id}`);
+      if (seenNames.has(instruction.name)) conflict(`Instruction name already exists: ${instruction.name}`);
+      seenIds.add(instruction.id);
+      seenNames.add(instruction.name);
+    }
+
+    await this.store.transaction(async (repos) => {
+      const existing = await repos.instructions.list(this.projectId);
+      const existingIds = new Set(existing.map((instruction) => instruction.id));
+      const existingNames = new Set(existing.map((instruction) => instruction.name));
+      for (const instruction of instructions) {
+        if (existingIds.has(instruction.id)) conflict(`Instruction already exists: ${instruction.id}`);
+        if (existingNames.has(instruction.name)) conflict(`Instruction name already exists: ${instruction.name}`);
+      }
+      if (repos.instructions.createMany) {
+        await repos.instructions.createMany(instructions);
+      } else {
+        for (const instruction of instructions) {
+          await repos.instructions.create(instruction);
+        }
+      }
+      if (instructions.length > 0) {
+        await repos.activity.append(this.activity.make(this.projectId, "instruction.batch_created", "project", this.projectId, `Created ${instructions.length} instructions`, { count: instructions.length }));
+      }
+    });
+    return instructions;
+  }
+
   async edit(idInput: string, input: EditInstructionInput): Promise<Instruction> {
     const id = normalizeId(idInput);
     if (input.query !== undefined) {

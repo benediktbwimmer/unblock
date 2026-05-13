@@ -900,6 +900,19 @@ class PrismInstructionRepository implements InstructionRepository {
     await this.store.record([objectMutation("object.create", "Instruction", instruction.id, instructionFields(instruction, fragment))]);
   }
 
+  async createMany(instructions: Instruction[]): Promise<void> {
+    const fragments = await Promise.all(instructions.map(async (instruction) => await this.store.ensureMatcherFragmentUse({
+      query: instruction.query,
+      consumerKind: "unblock.instruction",
+      consumerId: instruction.id,
+      enabled: instruction.enabled && instruction.archivedAt === null,
+      replacementScope: [instruction.projectId, instruction.id],
+    })));
+    await this.store.record(instructions.map((instruction, index) =>
+      objectMutation("object.create", "Instruction", instruction.id, instructionFields(instruction, fragments[index]!))
+    ));
+  }
+
   async update(instruction: Instruction): Promise<void> {
     const fragment = await this.store.ensureMatcherFragmentUse({
       query: instruction.query,

@@ -81,6 +81,7 @@ export interface InstructionRepository {
   list(projectId?: string): Promise<Instruction[]>;
   get(projectId: string, id: string): Promise<Instruction | null>;
   create(instruction: Instruction): Promise<void>;
+  createMany?(instructions: Instruction[]): Promise<void>;
   update(instruction: Instruction): Promise<void>;
 }
 

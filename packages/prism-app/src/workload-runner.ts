@@ -207,9 +207,7 @@ async function main(): Promise<void> {
     }, workload.taskTags.length));
 
     phases.push(await phase("unblock.instructions.create", async () => {
-      await parallelMap(workload.instructions, Math.min(options.concurrency, 4), async (instruction) => {
-        await services.instructions.add(instruction);
-      });
+      await services.instructions.addMany(workload.instructions);
       await waitFor("instructions visible", options, async () =>
         (await store!.instructions.list(options.unblockProjectId)).length >= workload.instructions.length
       );
