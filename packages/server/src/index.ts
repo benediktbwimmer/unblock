@@ -53,7 +53,11 @@ export function createApp(options: ServerOptions = {}) {
   const app = new Hono();
   app.use("*", cors());
 
-  app.get("/api/health", (c) => c.json({ ok: true }));
+  app.get("/api/health", async (c) => c.json({
+    ok: true,
+    mode: await isHostedMode(options) ? "hosted" : "local",
+    time: new Date().toISOString()
+  }));
   app.get("/api/config", async (c) => {
     const result = await readUnblockConfig(options.configPath ?? process.env.UNBLOCK_CONFIG ?? defaultUnblockConfigPath());
     return c.json({
@@ -76,7 +80,10 @@ export function createApp(options: ServerOptions = {}) {
   });
 
   app.use("/api/*", async (c, next) => {
-    const hosted = await hostedContextForRequest(c, options);
+    const startedAt = Date.now();
+    const id = requestId(c.req.raw.headers);
+    c.header("x-request-id", id);
+    const hosted = await hostedContextForRequest(c, options, id);
     const store = await openStore(options, hosted?.identity.tenantId);
     c.set("services", createServices(store));
     c.set("store", store);
@@ -84,11 +91,25 @@ export function createApp(options: ServerOptions = {}) {
     if (hosted) {
       c.set("hosted", hosted);
       await syncHostedIdentity(store, hosted.identity);
-      enforceHostedRateLimit(hosted.identity, options.hostedAuth ?? hostedRuntimeConfig());
+      const rateLimit = enforceHostedRateLimit(hosted.identity, options.hostedAuth ?? hostedRuntimeConfig());
+      c.header("x-ratelimit-remaining", String(rateLimit.remaining));
+      c.header("x-ratelimit-reset", String(Math.ceil(rateLimit.resetAt / 1000)));
     }
     try {
       await next();
     } finally {
+      if (hosted && process.env.UNBLOCK_STRUCTURED_LOGS !== "false") {
+        console.info(JSON.stringify({
+          event: "http.request",
+          requestId: id,
+          tenantId: hosted.identity.tenantId,
+          principalId: hosted.identity.principalId,
+          method: c.req.method,
+          path: c.req.path,
+          status: c.res.status,
+          durationMs: Date.now() - startedAt
+        }));
+      }
       await store.close?.();
     }
   });
@@ -199,6 +220,27 @@ export function createApp(options: ServerOptions = {}) {
     if (!repo) throw new UnblockError("validation", "Hosted secret repository is not available.");
     await repo.archive(c.req.param("id"), nowIso());
     return c.json({ ok: true });
+  });
+
+  app.get("/api/hosted/metrics", async (c) => {
+    const hosted = await requireHosted(c);
+    const projectId = c.req.query("projectId")?.trim();
+    await authorizeHosted(c, projectId ?? null);
+    const store = c.get("store");
+    const projects = await store.projects.list();
+    const visibleProjects = projectId ? projects.filter((project) => project.id === projectId) : projects;
+    const taskLists = await Promise.all(visibleProjects.map((project) => store.tasks.list(project.id)));
+    const tasks = taskLists.flat();
+    return c.json({
+      tenantId: hosted.identity.tenantId,
+      projectCount: visibleProjects.length,
+      taskCount: tasks.length,
+      openTaskCount: tasks.filter((task) => task.lifecycle === "open" && !task.archivedAt).length,
+      startedTaskCount: tasks.filter((task) => task.lifecycle === "started" && !task.archivedAt).length,
+      finishedTaskCount: tasks.filter((task) => task.lifecycle === "finished" && !task.archivedAt).length,
+      archivedTaskCount: tasks.filter((task) => task.archivedAt).length,
+      generatedAt: new Date().toISOString()
+    });
   });
 
   app.get("/api/tasks", async (c) => {
@@ -490,11 +532,11 @@ async function openStore(options: ServerOptions, requestTenantId?: string | unde
   });
 }
 
-async function hostedContextForRequest(c: Context, options: ServerOptions): Promise<HostedRequestContext | null> {
+async function hostedContextForRequest(c: Context, options: ServerOptions, id: string): Promise<HostedRequestContext | null> {
   if (!await isHostedMode(options)) return null;
   const config = options.hostedAuth ?? hostedRuntimeConfig();
   const identity = await resolveHostedIdentity(c.req.raw.headers, config);
-  return { identity, requestId: requestId(c.req.raw.headers) };
+  return { identity, requestId: id };
 }
 
 async function isHostedMode(options: ServerOptions): Promise<boolean> {

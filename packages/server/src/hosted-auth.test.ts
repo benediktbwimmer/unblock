@@ -125,6 +125,24 @@ describe("hosted authorization", () => {
       }
     }
   });
+
+  it("returns hosted operational headers and tenant metrics", async () => {
+    const store = await seededStore();
+    const app = createApp({ backend: "hosted", storeFactory: () => store, hostedAuth });
+
+    const metrics = await app.request("/api/hosted/metrics?projectId=HOSTED", {
+      headers: { ...hostedHeaders("admin"), "x-request-id": "req_test_123" }
+    });
+
+    expect(metrics.status).toBe(200);
+    expect(metrics.headers.get("x-request-id")).toBe("req_test_123");
+    expect(metrics.headers.get("x-ratelimit-remaining")).not.toBeNull();
+    await expect(metrics.json()).resolves.toMatchObject({
+      tenantId: "ORG_HOSTED",
+      projectCount: 1,
+      taskCount: 0
+    });
+  });
 });
 
 async function seededStore(): Promise<AppStore> {
