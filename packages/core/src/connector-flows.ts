@@ -17,6 +17,11 @@ export interface PrismFlowStartInput {
   correlationId: string;
   idempotencyKey: string;
   payload: ConnectorFlowTrigger;
+  prismProjectId?: string | undefined;
+  shardId?: string | undefined;
+  appId?: string | undefined;
+  workflowId?: string | undefined;
+  triggerId?: string | undefined;
 }
 
 export interface PrismFlowStartResult {
@@ -30,36 +35,70 @@ export interface PrismFlowClient {
   startFlow(input: PrismFlowStartInput): Promise<PrismFlowStartResult>;
 }
 
-export interface HttpPrismFlowClientOptions {
-  endpoint: string;
-  apiKey?: string | undefined;
-  fetch?: typeof fetch | undefined;
+export interface PrismFlowsExecutionSdkClient {
+  startFlow(input: {
+    projectId: string;
+    shardId?: string | undefined;
+    appId?: string | undefined;
+    flowId: string;
+    workflowId?: string | undefined;
+    triggerId?: string | undefined;
+    tenantId?: string | undefined;
+    unblockProjectId?: string | undefined;
+    correlationId?: string | undefined;
+    idempotencyKey?: string | undefined;
+    flowKey?: string | undefined;
+    payload?: unknown;
+    metadata?: Record<string, unknown> | undefined;
+    mode?: "attach_or_start" | "start_new" | "replace_terminal" | undefined;
+  }): Promise<{
+    runId: string;
+    status: string;
+    created?: boolean | undefined;
+    evidence?: Record<string, unknown> | undefined;
+  }>;
 }
 
-export class HttpPrismFlowClient implements PrismFlowClient {
-  private readonly endpoint: string;
-  private readonly fetchImpl: typeof fetch;
+export interface PrismFlowsExecutionClientOptions {
+  client: PrismFlowsExecutionSdkClient;
+  prismProjectId?: string | undefined;
+  appId?: string | undefined;
+  triggerId?: string | undefined;
+  workflowByFlowId?: Record<string, string> | undefined;
+}
 
-  constructor(private readonly options: HttpPrismFlowClientOptions) {
-    this.endpoint = options.endpoint.replace(/\/+$/, "");
-    this.fetchImpl = options.fetch ?? fetch;
-  }
+export class PrismFlowsExecutionClient implements PrismFlowClient {
+  constructor(private readonly options: PrismFlowsExecutionClientOptions) {}
 
   async startFlow(input: PrismFlowStartInput): Promise<PrismFlowStartResult> {
-    const response = await this.fetchImpl(`${this.endpoint}/api/flows/${encodeURIComponent(input.flowId)}/runs`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "idempotency-key": input.idempotencyKey,
-        ...(this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {})
+    const workflowId = input.workflowId ?? this.options.workflowByFlowId?.[input.flowId] ?? input.flowId;
+    const response = await this.options.client.startFlow({
+      projectId: input.prismProjectId ?? this.options.prismProjectId ?? "unblock-flows",
+      shardId: input.shardId ?? prismFlowShardId(input.tenantId, input.projectId),
+      appId: input.appId ?? this.options.appId ?? "flows",
+      flowId: input.flowId,
+      workflowId,
+      triggerId: input.triggerId ?? this.options.triggerId ?? "manual",
+      flowKey: input.idempotencyKey,
+      idempotencyKey: input.idempotencyKey,
+      tenantId: input.tenantId,
+      unblockProjectId: input.projectId,
+      correlationId: input.correlationId,
+      payload: input.payload,
+      metadata: {
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+        correlationId: input.correlationId,
+        idempotencyKey: input.idempotencyKey,
+        source: "unblock.connector_outbox",
       },
-      body: JSON.stringify(input)
+      mode: "attach_or_start",
     });
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Prism Flow start failed: ${response.status} ${body}`);
-    }
-    return await response.json() as PrismFlowStartResult;
+    return {
+      runId: response.runId,
+      status: response.created === false ? "deduplicated" : "started",
+      evidence: response.evidence,
+    };
   }
 }
 
@@ -235,6 +274,10 @@ function requireInbox(inbox: InboxEventRepository | undefined): InboxEventReposi
 
 function defaultRetryDelayMs(attemptCount: number): number {
   return Math.min(60_000, 1_000 * 2 ** Math.max(0, attemptCount - 1));
+}
+
+function prismFlowShardId(tenantId: string, projectId: string): string {
+  return `tenant:${tenantId}:project:${projectId}`;
 }
 
 function serializeConnectorError(error: unknown): Record<string, unknown> {

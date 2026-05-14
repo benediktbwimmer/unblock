@@ -1338,25 +1338,25 @@ class PrismDependencyRepository implements DependencyRepository {
       taskRow,
       dependsOnTaskRow,
       existingDependency,
-      reverseDependencySummary,
-      taskDescendantSummary,
-      dependsOnTaskDescendantSummary,
+      reverseDependencyPath,
+      taskContainsDependsOnTaskPath,
+      dependsOnTaskContainsTaskPath,
     ] = await this.store.materializedRowsByOutputKeys<Record<string, unknown>>([
       { surfaceId: "taskRows", replacementScope: projectId, outputKey: `${projectId}:${taskId}` },
       { surfaceId: "taskRows", replacementScope: projectId, outputKey: `${projectId}:${dependsOnTaskId}` },
       { surfaceId: "taskDependencyRows", replacementScope: projectId, outputKey: `${projectId}:${taskId}:${dependsOnTaskId}` },
-      { surfaceId: "taskDependencySummary", replacementScope: projectId, outputKey: `${projectId}:${dependsOnTaskId}` },
-      { surfaceId: "descendantSummary", replacementScope: projectId, outputKey: `${projectId}:${taskId}` },
-      { surfaceId: "descendantSummary", replacementScope: projectId, outputKey: `${projectId}:${dependsOnTaskId}` },
+      { surfaceId: "taskDependencyClosure", replacementScope: projectId, outputKey: `${projectId}:Task:${dependsOnTaskId}:Task:${taskId}` },
+      { surfaceId: "hierarchyClosure", replacementScope: projectId, outputKey: `${projectId}:Task:${taskId}:Task:${dependsOnTaskId}` },
+      { surfaceId: "hierarchyClosure", replacementScope: projectId, outputKey: `${projectId}:Task:${dependsOnTaskId}:Task:${taskId}` },
     ]);
 
     return {
       task: taskRow ? { id: stringValue(taskRow.id, ""), archivedAt: nullableString(taskRow.archived_at) } : null,
       dependsOnTask: dependsOnTaskRow ? { id: stringValue(dependsOnTaskRow.id, ""), archivedAt: nullableString(dependsOnTaskRow.archived_at) } : null,
       exists: existingDependency !== null,
-      createsDependencyCycle: stringArrayValue(reverseDependencySummary?.dependency_ids).includes(taskId),
-      taskContainsDependsOnTask: stringArrayValue(taskDescendantSummary?.descendant_ids).includes(dependsOnTaskId),
-      dependsOnTaskContainsTask: stringArrayValue(dependsOnTaskDescendantSummary?.descendant_ids).includes(taskId),
+      createsDependencyCycle: reverseDependencyPath !== null,
+      taskContainsDependsOnTask: taskContainsDependsOnTaskPath !== null,
+      dependsOnTaskContainsTask: dependsOnTaskContainsTaskPath !== null,
     };
   }
 
@@ -2409,7 +2409,7 @@ function materializedRowCacheTtlMs(): number {
 }
 
 function useBatchMaterializedReads(): boolean {
-  return process.env.UNBLOCK_PRISM_BATCH_MATERIALIZED_READS === "1";
+  return process.env.UNBLOCK_PRISM_BATCH_MATERIALIZED_READS !== "0";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

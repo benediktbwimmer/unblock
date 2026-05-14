@@ -28,16 +28,23 @@ export interface SmokeStep {
 
 const REQUIRED_ENV = [
   "UNBLOCK_HOSTED_API_URL",
-  "UNBLOCK_HOSTED_API_TOKEN",
   "UNBLOCK_TENANT_ID",
   "UNBLOCK_PROJECT_ID",
-  "PRISM_FLOWS_API_URL",
+  "PRISM_RUNTIME_ENDPOINT",
   "GITHUB_REPOSITORY",
   "GITHUB_TOKEN",
 ];
 
 export function missingGithubSmokeEnv(env: Env): string[] {
-  return REQUIRED_ENV.filter((key) => !env[key]?.trim());
+  const missing = REQUIRED_ENV.filter((key) => !env[key]?.trim());
+  if (usesTrustedHeaders(env)) {
+    for (const key of ["UNBLOCK_TRUSTED_PRINCIPAL_ID", "UNBLOCK_TRUSTED_ORGANIZATION_ID"]) {
+      if (!env[key]?.trim()) missing.push(key);
+    }
+  } else if (!env.UNBLOCK_HOSTED_API_TOKEN?.trim()) {
+    missing.push("UNBLOCK_HOSTED_API_TOKEN");
+  }
+  return missing;
 }
 
 export async function runGithubSmoke(env: Env, options: GithubSmokeOptions = {}): Promise<GithubSmokeResult> {
@@ -60,11 +67,11 @@ export async function runGithubSmoke(env: Env, options: GithubSmokeOptions = {})
   const cleanup = options.cleanup !== false;
   const now = options.now ?? (() => new Date());
   const baseUrl = trimTrailingSlash(required(env, "UNBLOCK_HOSTED_API_URL"));
-  const unblockToken = required(env, "UNBLOCK_HOSTED_API_TOKEN");
-  const prismFlowsUrl = trimTrailingSlash(required(env, "PRISM_FLOWS_API_URL"));
-  const prismFlowsToken = env.PRISM_FLOWS_API_TOKEN?.trim();
+  const unblockAuth = unblockAuthHeaders(env);
+  const prismRuntimeEndpoint = required(env, "PRISM_RUNTIME_ENDPOINT");
   const tenantId = required(env, "UNBLOCK_TENANT_ID");
   const projectId = required(env, "UNBLOCK_PROJECT_ID");
+  const prismProjectId = env.PRISM_FLOWS_PROJECT_ID?.trim() || "unblock-flows";
   const connectionId = env.UNBLOCK_GITHUB_CONNECTION_ID?.trim() || "github-main";
   const githubToken = required(env, "GITHUB_TOKEN");
   const [owner, repo] = parseRepository(required(env, "GITHUB_REPOSITORY"));
@@ -90,8 +97,9 @@ export async function runGithubSmoke(env: Env, options: GithubSmokeOptions = {})
     taskId = `GH-${Number(issue.number)}`;
 
     await timed(steps, "prism.github.inbound_flow", () =>
-      startPrismFlow(fetchImpl, prismFlowsUrl, prismFlowsToken, {
+      startPrismFlow(env, prismRuntimeEndpoint, {
         flowId: "github-issues-inbound",
+        prismProjectId,
         tenantId,
         projectId,
         correlationId: `${tenantId}:${projectId}:external:github:issue:${owner}/${repo}#${Number(issue.number)}`,
@@ -110,7 +118,7 @@ export async function runGithubSmoke(env: Env, options: GithubSmokeOptions = {})
 
     const task: any = await timed(steps, "unblock.task.read", () =>
       waitForJson(() =>
-        unblockJson(fetchImpl, baseUrl, unblockToken, `/api/tasks/${encodeURIComponent(taskId)}?projectId=${encodeURIComponent(projectId)}`), {
+        unblockJson(fetchImpl, baseUrl, unblockAuth, `/api/tasks/${encodeURIComponent(taskId)}?projectId=${encodeURIComponent(projectId)}`), {
           validate: (candidate: any) => candidate?.id === taskId && candidate?.title === issue.title,
           timeoutMs: Number(env.UNBLOCK_SMOKE_TIMEOUT_MS ?? 30_000),
           label: `task ${taskId}`,
@@ -120,7 +128,7 @@ export async function runGithubSmoke(env: Env, options: GithubSmokeOptions = {})
 
     const outboundTitle = `${title} outbound`;
     const updatedTask: any = await timed(steps, "unblock.task.update", () =>
-      unblockJson(fetchImpl, baseUrl, unblockToken, `/api/tasks/${encodeURIComponent(taskId)}?projectId=${encodeURIComponent(projectId)}`, {
+      unblockJson(fetchImpl, baseUrl, unblockAuth, `/api/tasks/${encodeURIComponent(taskId)}?projectId=${encodeURIComponent(projectId)}`, {
         method: "PATCH",
         body: {
           title: outboundTitle,
@@ -130,8 +138,9 @@ export async function runGithubSmoke(env: Env, options: GithubSmokeOptions = {})
     );
 
     await timed(steps, "prism.github.outbound_flow", () =>
-      startPrismFlow(fetchImpl, prismFlowsUrl, prismFlowsToken, {
+      startPrismFlow(env, prismRuntimeEndpoint, {
         flowId: "github-issues-outbound",
+        prismProjectId,
         tenantId,
         projectId,
         correlationId: `${tenantId}:${projectId}:local:task:${taskId}`,
@@ -167,7 +176,7 @@ export async function runGithubSmoke(env: Env, options: GithubSmokeOptions = {})
       const mappings: any[] = await unblockJson(
         fetchImpl,
         baseUrl,
-        unblockToken,
+        unblockAuth,
         `/api/connectors/github/mappings?projectId=${encodeURIComponent(projectId)}&connectionId=${encodeURIComponent(connectionId)}&limit=100`
       );
       if (!mappings.some((item) => item.taskId === taskId && Number(item.issueNumber) === Number(issue.number))) {
@@ -183,7 +192,7 @@ export async function runGithubSmoke(env: Env, options: GithubSmokeOptions = {})
       const confirmed: any = await unblockJson(
         fetchImpl,
         baseUrl,
-        unblockToken,
+        unblockAuth,
         `/api/tasks/${encodeURIComponent(taskId)}?projectId=${encodeURIComponent(projectId)}`
       );
       if (confirmed.title !== outboundTitle) {
@@ -307,25 +316,54 @@ function githubOutboundEvent(input: {
   };
 }
 
-async function startPrismFlow(fetchImpl: typeof fetch, baseUrl: string, token: string | undefined, input: {
+async function startPrismFlow(env: Env, endpoint: string, input: {
   flowId: string;
+  prismProjectId: string;
   tenantId: string;
   projectId: string;
   correlationId: string;
   idempotencyKey: string;
   payload: unknown;
 }) {
-  return await requestJson(fetchImpl, `${baseUrl}/api/flows/${encodeURIComponent(input.flowId)}/runs`, token, {
-    method: "POST",
-    headers: {
-      "idempotency-key": input.idempotencyKey,
+  const { DenoGrpcPrismFlowClient } = await import("../../../../prism-new3/packages/prism-flows/execution-deno.ts");
+  const client = new DenoGrpcPrismFlowClient({
+    endpoint,
+    protoPath: env.PRISM_RUNTIME_PROTO?.trim(),
+    defaultProjectId: input.prismProjectId,
+    timeoutMs: Number(env.UNBLOCK_SMOKE_TIMEOUT_MS ?? 30_000),
+  });
+  return await client.startFlow({
+    projectId: input.prismProjectId,
+    shardId: `tenant:${input.tenantId}:project:${input.projectId}`,
+    appId: "flows",
+    flowId: input.flowId,
+    workflowId: input.flowId,
+    triggerId: input.flowId === "github-issues-inbound" ? "github.issues" : "manual",
+    flowKey: input.idempotencyKey,
+    idempotencyKey: input.idempotencyKey,
+    tenantId: input.tenantId,
+    unblockProjectId: input.projectId,
+    correlationId: input.correlationId,
+    payload: input.payload,
+    metadata: {
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      correlationId: input.correlationId,
+      idempotencyKey: input.idempotencyKey,
+      source: "github_smoke",
     },
-    body: input,
+    mode: "attach_or_start",
   });
 }
 
-async function unblockJson(fetchImpl: typeof fetch, baseUrl: string, token: string, path: string, init: JsonRequest = {}) {
-  return await requestJson(fetchImpl, `${baseUrl}${path}`, token, init);
+async function unblockJson(fetchImpl: typeof fetch, baseUrl: string, authHeaders: Record<string, string>, path: string, init: JsonRequest = {}) {
+  return await requestJson(fetchImpl, `${baseUrl}${path}`, undefined, {
+    ...init,
+    headers: {
+      ...authHeaders,
+      ...init.headers,
+    },
+  });
 }
 
 async function githubJson(fetchImpl: typeof fetch, token: string, path: string, init: JsonRequest = {}) {
@@ -399,6 +437,23 @@ function parseRepository(value: string): [string, string] {
     throw new Error("GITHUB_REPOSITORY must use owner/repo format.");
   }
   return [owner, repo];
+}
+
+function unblockAuthHeaders(env: Env): Record<string, string> {
+  if (usesTrustedHeaders(env)) {
+    return {
+      "x-unblock-principal-id": required(env, "UNBLOCK_TRUSTED_PRINCIPAL_ID"),
+      "x-unblock-workos-organization-id": required(env, "UNBLOCK_TRUSTED_ORGANIZATION_ID"),
+      "x-unblock-roles": env.UNBLOCK_TRUSTED_ROLES?.trim() || "owner",
+      ...(env.UNBLOCK_TRUSTED_PERMISSIONS?.trim() ? { "x-unblock-permissions": env.UNBLOCK_TRUSTED_PERMISSIONS.trim() } : {}),
+      ...(env.UNBLOCK_TRUSTED_SESSION_ID?.trim() ? { "x-unblock-session-id": env.UNBLOCK_TRUSTED_SESSION_ID.trim() } : {}),
+    };
+  }
+  return { Authorization: `Bearer ${required(env, "UNBLOCK_HOSTED_API_TOKEN")}` };
+}
+
+function usesTrustedHeaders(env: Env): boolean {
+  return env.UNBLOCK_HOSTED_AUTH_MODE?.trim() === "trusted-headers" || env.UNBLOCK_SMOKE_AUTH_MODE?.trim() === "trusted-headers";
 }
 
 function required(env: Env, key: string): string {

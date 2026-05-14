@@ -24,6 +24,9 @@ interface RunnerOptions {
   materializedSurfaceSchema: string | undefined;
   runtimeTablePrefix: string;
   prismCli: string;
+  prismPostgresMaxConnections: number;
+  materializerClaimLimit: number;
+  materializerWorkerCount: number;
   generatedDir: string;
   startPrism: boolean;
   migrate: boolean;
@@ -181,10 +184,24 @@ async function main(): Promise<void> {
     workloadStartedAt = performance.now();
 
     const projectStartedAt = performance.now();
-    const projectRunner = options.mode === "mixed" ? runProjectMixedWorkload : runProjectWorkload;
-    const projectReports = await Promise.all(
-      Array.from({ length: options.projects }, (_, index) => projectRunner(options, index)),
-    );
+    let projectReports: ProjectReport[];
+    if (options.mode === "mixed") {
+      const seedReports = await Promise.all(
+        Array.from({ length: options.projects }, (_, index) =>
+          runProjectWorkload({ ...options, mode: "bulk", queries: Math.min(options.queries, 2) }, index)
+        ),
+      );
+      phases.push(await phase("unblock.seed.materializer_idle", async () => {
+        await waitForMaterializerIdle(options);
+      }));
+      projectReports = await Promise.all(
+        seedReports.map((seed, index) => runProjectMixedOperations(options, index, seed)),
+      );
+    } else {
+      projectReports = await Promise.all(
+        Array.from({ length: options.projects }, (_, index) => runProjectWorkload(options, index)),
+      );
+    }
     const workloadElapsedMs = Math.round(performance.now() - projectStartedAt);
     phases.push(...aggregateProjectPhases(projectReports));
     const totals = aggregateProjectTotals(projectReports);
@@ -371,6 +388,11 @@ async function runProjectWorkload(options: RunnerOptions, projectIndex: number):
 
 async function runProjectMixedWorkload(options: RunnerOptions, projectIndex: number): Promise<ProjectReport> {
   const seed = await runProjectWorkload({ ...options, mode: "bulk", queries: Math.min(options.queries, 2) }, projectIndex);
+  await waitForMaterializerIdle(options);
+  return await runProjectMixedOperations(options, projectIndex, seed);
+}
+
+async function runProjectMixedOperations(options: RunnerOptions, projectIndex: number, seed: ProjectReport): Promise<ProjectReport> {
   const projectOptions = optionsForProject(options, projectIndex);
   const store = createPrismStore({
     endpoint: options.endpoint,
@@ -665,6 +687,12 @@ function startPrismServe(options: RunnerOptions): PrismProcess {
     options.schema,
     "--runtime-v2-postgres-table-prefix",
     options.runtimeTablePrefix,
+    "--postgres-max-connections",
+    String(options.prismPostgresMaxConnections),
+    "--materializer-claim-limit",
+    String(options.materializerClaimLimit),
+    "--materializer-worker-count",
+    String(options.materializerWorkerCount),
   ];
   if (options.postgresUrl) args.push("--postgres-url", options.postgresUrl);
   if (options.materializedSurfaceSchema) {
@@ -704,6 +732,34 @@ async function waitForRuntimeHealth(options: RunnerOptions): Promise<void> {
       return false;
     }
   });
+}
+
+async function waitForMaterializerIdle(options: RunnerOptions): Promise<void> {
+  if (!options.postgresUrl) return;
+  await waitFor("materializer queue idle", options, async () =>
+    await materializerPendingCount(options) === 0
+  );
+}
+
+async function materializerPendingCount(options: RunnerOptions): Promise<number> {
+  if (!options.postgresUrl) return 0;
+  validatePostgresIdentifier(options.schema, "--schema");
+  const table = `${quotedIdentifier(options.schema)}.${quotedIdentifier("prism_materialization_queue")}`;
+  const stdout = await execFileChecked("psql", [
+    options.postgresUrl,
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-q",
+    "-t",
+    "-A",
+    "-c",
+    `select count(*)::int from ${table} where completed_at is null;`,
+  ], {
+    cwd: REPO_ROOT,
+    env: process.env,
+    quiet: true,
+  });
+  return Number.parseInt(stdout.trim(), 10) || 0;
 }
 
 async function waitFor(name: string, options: RunnerOptions, predicate: () => Promise<boolean>): Promise<void> {
@@ -856,6 +912,9 @@ function parseArgs(args: string[]): RunnerOptions {
   const explicitRuntimeTablePrefix = optionalStringOption(args, "runtime-table-prefix");
   const runtimeTablePrefix = explicitRuntimeTablePrefix ?? runtimeTablePrefixForWorkload(workloadId);
   validateRuntimeTablePrefix(runtimeTablePrefix);
+  const projects = numberOption(args, "projects", 1);
+  const concurrency = numberOption(args, "concurrency", Math.min(8, Math.max(1, cpus().length)));
+  const postgresConnectionDefault = Math.min(96, Math.max(32, projects * Math.min(concurrency, 12)));
   return {
     mode,
     workloadId,
@@ -872,6 +931,21 @@ function parseArgs(args: string[]): RunnerOptions {
     materializedSurfaceSchema: optionalStringOption(args, "materialized-surface-schema"),
     runtimeTablePrefix,
     prismCli: stringOption(args, "prism-cli", defaultPrismCli()),
+    prismPostgresMaxConnections: numberOption(
+      args,
+      "prism-postgres-max-connections",
+      envNumber("UNBLOCK_PRISM_POSTGRES_MAX_CONNECTIONS", postgresConnectionDefault),
+    ),
+    materializerClaimLimit: numberOption(
+      args,
+      "materializer-claim-limit",
+      envNumber("UNBLOCK_PRISM_MATERIALIZER_CLAIM_LIMIT", 100),
+    ),
+    materializerWorkerCount: numberOption(
+      args,
+      "materializer-worker-count",
+      envNumber("UNBLOCK_PRISM_MATERIALIZER_WORKERS", 4),
+    ),
     generatedDir: stringOption(args, "generated-dir", join(PACKAGE_ROOT, "generated")),
     startPrism: booleanOption(args, "start-prism", true),
     migrate: booleanOption(args, "migrate", true),
@@ -880,14 +954,14 @@ function parseArgs(args: string[]): RunnerOptions {
     cleanupSchema: booleanOption(args, "cleanup-schema", explicitSchema === undefined),
     cleanupRuntimeTables: booleanOption(args, "cleanup-runtime-tables", explicitRuntimeTablePrefix === undefined),
     tasks: numberOption(args, "tasks", 50),
-    projects: numberOption(args, "projects", 1),
+    projects,
     dependencyFanout: numberOption(args, "dependency-fanout", 2),
     tags: numberOption(args, "tags", 6),
     tagFanout: numberOption(args, "tag-fanout", 1),
     instructions: numberOption(args, "instructions", 3),
     queries: numberOption(args, "queries", 5),
     mixedOperations: numberOption(args, "mixed-operations", 100),
-    concurrency: numberOption(args, "concurrency", Math.min(8, Math.max(1, cpus().length))),
+    concurrency,
     waitTimeoutMs: numberOption(args, "wait-timeout-ms", 60_000),
     waitPollMs: numberOption(args, "wait-poll-ms", 250),
     json: booleanOption(args, "json", false),
@@ -952,6 +1026,14 @@ function numberOption(args: string[], name: string, fallback: number): number {
   if (raw === undefined) return fallback;
   const value = Number(raw);
   if (!Number.isFinite(value) || value < 0) throw new Error(`--${name} must be a non-negative number`);
+  return Math.floor(value);
+}
+
+function envNumber(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) throw new Error(`${name} must be a non-negative number`);
   return Math.floor(value);
 }
 

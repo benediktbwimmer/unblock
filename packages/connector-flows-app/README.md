@@ -47,11 +47,11 @@ UNBLOCK_HOSTED_API_TOKEN=... \
 UNBLOCK_TENANT_ID=... \
 UNBLOCK_PROJECT_ID=... \
 UNBLOCK_GITHUB_CONNECTION_ID=github-main \
-PRISM_FLOWS_API_URL=https://flows.example.com \
-PRISM_FLOWS_API_TOKEN=... \
+PRISM_RUNTIME_ENDPOINT=http://127.0.0.1:50051 \
+PRISM_FLOWS_PROJECT_ID=unblock-flows \
 GITHUB_REPOSITORY=owner/repo \
 GITHUB_TOKEN=... \
-deno run --allow-env --allow-net packages/connector-flows-app/scripts/github_smoke.ts
+deno run --allow-env --allow-net --allow-read packages/connector-flows-app/scripts/github_smoke.ts
 ```
 
 The smoke creates a GitHub issue, starts the `github-issues-inbound` Flow,

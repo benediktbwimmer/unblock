@@ -17,6 +17,7 @@ service RuntimeService {
   rpc FindSubjectsByTag(TagSubjectsRequest) returns (TagSubjectsResponse);
   rpc ReadMaterializedSurface(MaterializedSurfaceRequest) returns (MaterializedSurfaceResponse);
   rpc ReadMaterializedSurfaces(MaterializedSurfaceBatchRequest) returns (MaterializedSurfaceBatchResponse);
+  rpc StartFlow(FlowStartRequest) returns (FlowStartResponse);
   rpc StartWorkflow(WorkflowStartRequest) returns (WorkflowStartResponse);
   rpc ReadWorkflow(WorkflowReadRequest) returns (WorkflowReadResponse);
   rpc WatchWorkflow(WorkflowWatchRequest) returns (WorkflowReadResponse);
@@ -333,6 +334,33 @@ message WorkflowStartRequest {
   string metadata_json = 7;
   string parent_workflow_ref = 8;
   string mode = 9;
+}
+
+message FlowStartRequest {
+  string project_id = 1;
+  string shard_id = 2;
+  string app_id = 3;
+  string flow_id = 4;
+  string workflow_id = 5;
+  string trigger_id = 6;
+  string flow_key = 7;
+  string idempotency_key = 8;
+  string input_json = 9;
+  string metadata_json = 10;
+  string parent_workflow_ref = 11;
+  string mode = 12;
+}
+
+message FlowStartResponse {
+  string project_id = 1;
+  string shard_id = 2;
+  string app_id = 3;
+  string flow_id = 4;
+  string workflow_id = 5;
+  string trigger_id = 6;
+  string flow_key = 7;
+  string idempotency_key = 8;
+  WorkflowStartResponse workflow = 9;
 }
 
 message WorkflowStartResponse {

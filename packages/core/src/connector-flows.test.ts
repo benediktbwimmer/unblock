@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { connectorEvent, outboxEventForConnector } from "./connector-events.js";
 import {
   applyConnectorInboxEvent,
+  PrismFlowsExecutionClient,
   publishConnectorOutboxToPrismFlows,
   type PrismFlowClient,
   type PrismFlowStartInput
@@ -13,6 +14,41 @@ import type { InboxEvent, OutboxEvent } from "./types.js";
 import { nowIso } from "./types.js";
 
 describe("connector outbox publisher", () => {
+  it("adapts connector outbox starts through the Prism Flows execution SDK", async () => {
+    const starts: any[] = [];
+    const client = new PrismFlowsExecutionClient({
+      prismProjectId: "unblock-flows",
+      client: {
+        async startFlow(input) {
+          starts.push(input);
+          return { runId: "workflow:run", status: "running", created: true, evidence: { workflowKey: input.flowKey } };
+        }
+      }
+    });
+
+    const result = await client.startFlow({
+      flowId: "github-issues-outbound",
+      tenantId: "TENANT",
+      projectId: "PROJECT",
+      correlationId: "corr-1",
+      idempotencyKey: "idem-1",
+      payload: { event: {} } as any
+    });
+
+    expect(result).toMatchObject({ runId: "workflow:run", status: "started" });
+    expect(starts[0]).toMatchObject({
+      projectId: "unblock-flows",
+      shardId: "tenant:TENANT:project:PROJECT",
+      appId: "flows",
+      flowId: "github-issues-outbound",
+      workflowId: "github-issues-outbound",
+      triggerId: "manual",
+      flowKey: "idem-1",
+      idempotencyKey: "idem-1",
+      unblockProjectId: "PROJECT"
+    });
+  });
+
   it("publishes ready connector events to Prism Flows with idempotency evidence", async () => {
     const outbox = new FakeOutbox();
     const event = connectorEvent({
