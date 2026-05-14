@@ -91,6 +91,284 @@ The implementation should avoid a fourth implicit mode. In particular:
   SQLite and Postgres, but hosted auth and connector orchestration should stay
   outside that local compatibility path.
 
+## Postgres-Native Core Schema
+
+The Postgres schema should be a native application schema, not generated Prism
+storage. It should make the hot paths cheap: scoped task CRUD, dependency
+updates, matcher reads, queue reads, dashboard polling, and instruction
+matching.
+
+### Schema Principles
+
+- Every tenant-owned row carries `tenant_id`; every project-owned row carries
+  both `tenant_id` and `project_id`.
+- Public task IDs remain project-scoped strings. Internal UUID primary keys may
+  be added for joins, but the API contract continues to use project-local task
+  IDs.
+- Foreign keys enforce tenant/project boundaries.
+- `created_at`, `updated_at`, and archive timestamps use `timestamptz`.
+- Optimistic write protection uses the existing task `version` behavior.
+- High-volume activity, audit, outbox, inbox, and connector events are append
+  heavy and should be partitionable by time or tenant later.
+- Hosted-only tables can exist in the same database, but local SQLite does not
+  need equivalents unless the feature is enabled locally.
+
+### Identity And Scope
+
+`tenants`
+
+- Hosted organization boundary.
+- Key columns: `id`, `slug`, `name`, `created_at`, `updated_at`,
+  `archived_at`.
+- Hosted mode maps WorkOS organizations onto tenants.
+- Self-hosted Postgres can create a single default tenant.
+
+`tenant_members`
+
+- Hosted user and role membership.
+- Key columns: `tenant_id`, `principal_id`, `role`, `created_at`,
+  `updated_at`, `disabled_at`.
+- Role checks happen before project-scoped domain services run.
+
+`projects`
+
+- Same project namespace as SQLite, scoped under a tenant.
+- Key columns: `tenant_id`, `id`, `name`, `description`, timestamps,
+  `archived_at`.
+- Unique key: `(tenant_id, id)`.
+
+`project_members`
+
+- Optional project-specific permissions for hosted mode.
+- Key columns: `tenant_id`, `project_id`, `principal_id`, `role`,
+  `created_at`, `updated_at`, `disabled_at`.
+
+### Core Task Domain
+
+`tasks`
+
+- Postgres equivalent of the SQLite `tasks` table.
+- Key columns: `tenant_id`, `project_id`, `id`, `parent_task_id`, `title`,
+  `description`, `lifecycle`, `priority`, `size`, source fields,
+  `completion_bar`, lifecycle timestamps, `archived_at`, `version`.
+- Primary key: `(tenant_id, project_id, id)`.
+- Foreign key: `(tenant_id, project_id, parent_task_id)` to `tasks`.
+- Important indexes:
+  - `(tenant_id, project_id, archived_at, lifecycle)`
+  - `(tenant_id, project_id, parent_task_id)`
+  - `(tenant_id, project_id, priority)`
+  - `(tenant_id, project_id, updated_at desc)`
+  - `(tenant_id, project_id, source_doc, source_section)`
+
+`task_dependencies`
+
+- Explicit hard dependency edges.
+- Key columns: `tenant_id`, `project_id`, `task_id`, `depends_on_task_id`,
+  `created_at`.
+- Primary key: `(tenant_id, project_id, task_id, depends_on_task_id)`.
+- Foreign keys point to project-local tasks.
+- Check: `task_id != depends_on_task_id`.
+- Important indexes:
+  - `(tenant_id, project_id, task_id)`
+  - `(tenant_id, project_id, depends_on_task_id)`
+
+`task_dependency_closure`
+
+- Optional Postgres read optimization for transitive dependency queries.
+- Key columns: `tenant_id`, `project_id`, `task_id`, `depends_on_task_id`,
+  `depth`, `edge_kinds`, `updated_at`.
+- The implementation may start without this table if recursive CTEs meet
+  benchmark gates. If introduced, it must be transactionally maintained or
+  rebuilt with a correctness check.
+
+`task_hierarchy_closure`
+
+- Optional Postgres read optimization for ancestor/descendant queries and
+  parent rollups.
+- Key columns: `tenant_id`, `project_id`, `ancestor_task_id`,
+  `descendant_task_id`, `depth`, `updated_at`.
+- Like dependency closure, this is allowed only if benchmarks justify it and
+  tests prove parity with the source edges.
+
+### Tags, Queues, Instructions, Views
+
+`tags`
+
+- Project-scoped tag catalog.
+- Key columns: `tenant_id`, `project_id`, `id`, `name`, `color`,
+  `description`, `sort_order`, timestamps, `archived_at`.
+- Unique keys: `(tenant_id, project_id, id)` and `(tenant_id, project_id,
+  lower(name))`.
+
+`task_tags`
+
+- Many-to-many task/tag relation.
+- Key columns: `tenant_id`, `project_id`, `task_id`, `tag_id`, `created_at`.
+- Primary key: `(tenant_id, project_id, task_id, tag_id)`.
+- Important index: `(tenant_id, project_id, tag_id, task_id)`.
+
+`tracks`
+
+- Actor queue identity.
+- Key columns: `tenant_id`, `project_id`, `id`, `machine`, `actor`, `name`,
+  timestamps, `archived_at`.
+- Unique key: `(tenant_id, project_id, machine, actor)`.
+
+`track_assignments`
+
+- Exclusive assignment of a task to one actor queue.
+- Key columns: `tenant_id`, `project_id`, `track_id`, `task_id`, `position`,
+  `assigned_at`.
+- Primary key: `(tenant_id, project_id, track_id, task_id)`.
+- Unique key: `(tenant_id, project_id, task_id)`.
+- Important index: `(tenant_id, project_id, track_id, position)`.
+
+`instructions`
+
+- Matcher-backed instruction records.
+- Key columns: `tenant_id`, `project_id`, `id`, `name`, `query`, `body`,
+  `enabled`, timestamps, `archived_at`.
+- Unique keys: `(tenant_id, project_id, id)` and `(tenant_id, project_id,
+  lower(name))`.
+- Important index: `(tenant_id, project_id, enabled, archived_at)`.
+- Runtime matching remains derived from `query`; no imperative attachment table
+  is the source of truth.
+
+`saved_views` and `queue_feeds`
+
+- Named matcher queries.
+- Key columns: `tenant_id`, `project_id`, `id`, `name`, `query`, timestamps,
+  `archived_at`.
+- Unique keys by project-local ID and case-insensitive name.
+
+`comments`
+
+- Flat chronological markdown comments.
+- Key columns: `tenant_id`, `project_id`, `id`, `task_id`, `machine`, `actor`,
+  `body`, timestamps, `archived_at`.
+- Important indexes:
+  - `(tenant_id, project_id, task_id, created_at)`
+  - `(tenant_id, project_id, archived_at)`
+  - `(tenant_id, project_id, machine, actor, created_at)`
+
+### Matcher Support
+
+Matcher queries should lower to SQL over the normalized tables and optional
+closure tables. The matcher AST remains the semantic source of truth.
+
+`matcher_query_cache`
+
+- Optional hosted optimization for parsed/planned matcher queries.
+- Key columns: `tenant_id`, `project_id`, `query_hash`, `query`, `ast_json`,
+  `plan_json`, `created_at`, `last_used_at`.
+- This is a compiler/planner cache only. It must not cache result sets as the
+  primary correctness path.
+
+`instruction_match_cache`
+
+- Avoid this as a required table initially. Instruction matches should be a
+  derived read from enabled instruction queries. Add a cache only if benchmarks
+  prove repeated matching needs it, and invalidate by task/instruction version.
+
+### Activity And Hosted Audit
+
+`activity`
+
+- Postgres equivalent of the current local activity stream.
+- Key columns: `tenant_id`, `project_id`, `id`, `type`, `subject_type`,
+  `subject_id`, `message`, `data_json`, `machine`, `actor`, `created_at`.
+- Important indexes:
+  - `(tenant_id, project_id, created_at desc)`
+  - `(tenant_id, project_id, subject_type, subject_id, created_at desc)`
+
+`audit_events`
+
+- Hosted enterprise audit trail. This extends activity and is not required for
+  local SQLite.
+- Key columns: `tenant_id`, `id`, `project_id`, `event_type`, `principal_id`,
+  `actor_machine`, `actor_name`, `subject_type`, `subject_id`, `ip_address`,
+  `user_agent`, `request_id`, `data_json`, `created_at`.
+- Records security, auth, admin, connector, secret, WorkOS, and operator events.
+- Append-only at the application layer. Hosted retention/export policies apply
+  here.
+
+### Outbox, Inbox, And Connector Mapping
+
+`outbox_events`
+
+- Durable events emitted by Unblock domain transactions for external
+  orchestration.
+- Key columns: `tenant_id`, `project_id`, `id`, `event_type`, `subject_type`,
+  `subject_id`, `payload_json`, `idempotency_key`, `status`, `attempt_count`,
+  `available_at`, `created_at`, `claimed_at`, `processed_at`, `error_json`.
+- Unique key: `(tenant_id, idempotency_key)` when an idempotency key is present.
+- Important index: `(tenant_id, status, available_at, created_at)`.
+- Written in the same transaction as the task/tag/dependency change that
+  produced it.
+
+`inbox_events`
+
+- Idempotent application record for inbound connector events.
+- Key columns: `tenant_id`, `project_id`, `id`, `source`, `external_event_id`,
+  `event_type`, `payload_json`, `status`, `applied_at`, `created_at`,
+  `error_json`.
+- Unique key: `(tenant_id, source, external_event_id)`.
+- Ensures webhook replay and Flow retry cannot apply the same external event
+  twice.
+
+`connector_connections`
+
+- Hosted connector configuration at tenant/project scope.
+- Key columns: `tenant_id`, `project_id`, `id`, `provider`, `display_name`,
+  `status`, `settings_json`, `secret_ref`, timestamps, `archived_at`.
+- GitHub Issues is the first provider.
+
+`external_object_mappings`
+
+- Stable mapping between Unblock objects and external objects.
+- Key columns: `tenant_id`, `project_id`, `id`, `connection_id`,
+  `external_system`, `external_kind`, `external_id`, `external_url`,
+  `local_kind`, `local_id`, `sync_direction`, `source_of_truth`,
+  `external_version`, `local_version`, timestamps, `archived_at`.
+- Unique keys:
+  - `(tenant_id, connection_id, external_system, external_kind, external_id)`
+  - `(tenant_id, project_id, local_kind, local_id, connection_id,
+    external_kind)`
+
+`sync_cursors`
+
+- Durable polling/backfill cursor state.
+- Key columns: `tenant_id`, `project_id`, `connection_id`, `cursor_name`,
+  `cursor_value`, `watermark_at`, `updated_at`.
+- Updated only after emitted evidence is durable.
+
+`sync_runs`
+
+- Operator-visible connector run records.
+- Key columns: `tenant_id`, `project_id`, `id`, `connection_id`, `run_type`,
+  `status`, `started_at`, `finished_at`, `stats_json`, `error_json`,
+  `flow_run_ref`.
+
+`dead_letters`
+
+- Events requiring operator review.
+- Key columns: `tenant_id`, `project_id`, `id`, `connection_id`, `source`,
+  `event_ref`, `reason`, `payload_ref`, `status`, `created_at`,
+  `resolved_at`, `resolved_by`.
+
+### Schema Work Deferred To Later Tasks
+
+Later implementation tasks should decide:
+
+- Whether dependency and hierarchy closure tables are required at launch or
+  whether recursive CTEs meet the benchmark gates.
+- Exact enum representation for lifecycle, roles, connector status, and event
+  status.
+- Whether task IDs stay purely text keys in Postgres or receive internal UUIDs
+  for join-heavy hosted paths.
+- How audit retention and export are physically partitioned.
+- Whether matcher planning caches are needed after the first benchmark pass.
+
 ## Current SQLite Contract
 
 The existing SQLite path is the compatibility contract for local Unblock. Any
