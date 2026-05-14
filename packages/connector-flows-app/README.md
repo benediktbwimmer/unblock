@@ -12,6 +12,11 @@ Current fixture:
   reconciliation trigger.
 - `mockConnectorApply`: deterministic mock connector job used to review the
   Flow boundary before GitHub Issues is implemented.
+- `github-issues-inbound`: GitHub `issues` webhook ingestion with Prism trigger
+  signature metadata, delivery dedupe, issue-to-task mapping, and Unblock inbox
+  application.
+- `normalizeGitHubIssueWebhook`: deterministic webhook normalizer that converts
+  GitHub issue payloads into typed Unblock connector events and mapping writes.
 - `unblock-hosted-api`: redacted bearer-token connection to hosted Unblock.
 - `mock-external`: redacted API-key connection for the mocked connector target.
 
