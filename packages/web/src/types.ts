@@ -189,7 +189,7 @@ export interface SourceCoverage {
   archived: number;
 }
 
-export type ViewMode = "tasks" | "queues" | "tags" | "instructions" | "coverage" | "activity";
+export type ViewMode = "tasks" | "queues" | "tags" | "instructions" | "connectors" | "coverage" | "activity";
 export type StatusFilter = ComputedStatus;
 export type TaskAction = "start" | "finish" | "reopen" | "archive" | "restore";
 
@@ -242,6 +242,30 @@ export interface CreateTaskDraft {
   id: string;
   title: string;
   priority: string;
+}
+
+export interface GitHubConnectionRecord {
+  projectId: string;
+  id: string;
+  provider: "github";
+  displayName: string;
+  status: "active" | "paused" | "error" | "archived";
+  updatedAt: string;
+  lastSyncAt: string | null;
+  lastErrorAt: string | null;
+  metadata: {
+    authModel: "github_app_installation";
+    appId: string;
+    installationId: string;
+    repositoryOwner: string;
+    repositoryName: string;
+    privateKeySecretId: string;
+    webhookSecretId: string;
+    syncDirection: "github_to_unblock" | "unblock_to_github" | "bidirectional";
+    conflictPolicy: "github_wins" | "unblock_wins" | "last_writer_wins" | "operator_review";
+    requiredPermissions: Record<string, string>;
+    subscribeEvents: string[];
+  };
 }
 
 export interface DependencyCandidateState {

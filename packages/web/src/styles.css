@@ -1277,6 +1277,74 @@ button.comment-chip:hover {
   font-size: 15px;
 }
 
+.connector-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: 14px;
+  padding: 14px;
+}
+
+.connector-config,
+.connector-row {
+  border: 1px solid #dfe5ef;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.connector-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.connector-list {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.connector-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.connector-row p {
+  margin-top: 4px;
+  color: #657083;
+  font-size: 13px;
+}
+
+.connector-meta,
+.connector-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.connector-meta {
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.connector-meta span {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #dfe5ef;
+  border-radius: 999px;
+  padding: 0 8px;
+  color: #394456;
+  background: #f8fafc;
+  font-size: 12px;
+}
+
+.icon-button.danger {
+  color: #b42318;
+  border-color: #f3b8b3;
+}
+
 .queue-column {
   border: 1px solid #e2e6ee;
   border-radius: 8px;

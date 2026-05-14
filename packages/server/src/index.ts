@@ -23,6 +23,7 @@ import {
   parseHostedSecretKey,
   requestConnectorReconciliation,
   rotateHostedSecret,
+  setConnectorConnectionStatus,
   UnblockError,
   upsertGitHubIssueMapping,
   upsertGitHubConnection,
@@ -335,6 +336,39 @@ export function createApp(options: ServerOptions = {}) {
     const body = githubConnectionInputSchema.parse(await c.req.json());
     await authorizeHosted(c, body.projectId);
     return c.json(await upsertGitHubConnection(c.get("store"), body), 201);
+  });
+
+  app.post("/api/connectors/github/connections/:id/pause", async (c) => {
+    await requireHosted(c);
+    const projectId = requireProjectId(c);
+    await authorizeHosted(c, projectId);
+    return c.json(await setConnectorConnectionStatus(c.get("store"), {
+      projectId,
+      connectionId: c.req.param("id"),
+      status: "paused"
+    }));
+  });
+
+  app.post("/api/connectors/github/connections/:id/resume", async (c) => {
+    await requireHosted(c);
+    const projectId = requireProjectId(c);
+    await authorizeHosted(c, projectId);
+    return c.json(await setConnectorConnectionStatus(c.get("store"), {
+      projectId,
+      connectionId: c.req.param("id"),
+      status: "active"
+    }));
+  });
+
+  app.delete("/api/connectors/github/connections/:id", async (c) => {
+    await requireHosted(c);
+    const projectId = requireProjectId(c);
+    await authorizeHosted(c, projectId);
+    return c.json(await setConnectorConnectionStatus(c.get("store"), {
+      projectId,
+      connectionId: c.req.param("id"),
+      status: "archived"
+    }));
   });
 
   app.get("/api/connectors/github/mappings", async (c) => {

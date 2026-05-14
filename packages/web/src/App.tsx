@@ -9,6 +9,7 @@ import {
   ListChecks,
   ListTree,
   Plus,
+  PlugZap,
   RefreshCw,
   Search,
   Tags,
@@ -19,6 +20,7 @@ import { fetchJson, mutate, mutateJson, withProject } from "./api";
 import { TopMatcherEditor } from "./matcher/MatcherEditor";
 import { ActivityView } from "./views/ActivityView";
 import { CoverageView } from "./views/CoverageView";
+import { ConnectorsView } from "./views/ConnectorsView";
 import { InstructionsView } from "./views/InstructionsView";
 import { QueuesView } from "./views/QueuesView";
 import { TagsView } from "./views/TagsView";
@@ -782,6 +784,7 @@ function App() {
           <NavButton active={uiState.mode === "queues"} icon={<UserRound size={17} />} label="Queues" onClick={() => updateUiState({ mode: "queues" })} />
           <NavButton active={uiState.mode === "tags"} icon={<Tags size={17} />} label="Tags" onClick={() => updateUiState({ mode: "tags" })} />
           <NavButton active={uiState.mode === "instructions"} icon={<BookOpen size={17} />} label="Instructions" onClick={() => updateUiState({ mode: "instructions" })} />
+          <NavButton active={uiState.mode === "connectors"} icon={<PlugZap size={17} />} label="Connectors" onClick={() => updateUiState({ mode: "connectors" })} />
           <NavButton active={uiState.mode === "coverage"} icon={<Blocks size={17} />} label="Coverage" onClick={() => updateUiState({ mode: "coverage" })} />
           <NavButton active={uiState.mode === "activity"} icon={<Activity size={17} />} label="Activity" onClick={() => updateUiState({ mode: "activity" })} />
         </nav>
@@ -965,6 +968,7 @@ function App() {
           />
         ) : null}
 
+        {uiState.mode === "connectors" ? <ConnectorsView projectId={uiState.projectId} onError={setError} /> : null}
         {uiState.mode === "coverage" ? <CoverageView coverage={coverage} /> : null}
         {uiState.mode === "activity" ? <ActivityView initialActivity={activity} projectId={uiState.projectId} grammar={matcherGrammar} onOpenTask={(task) => openTask(task.id)} /> : null}
       </main>

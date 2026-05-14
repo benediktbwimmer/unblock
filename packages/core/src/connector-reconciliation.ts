@@ -69,6 +69,29 @@ export async function upsertConnectorConnection(store: AppStore, input: Connecto
   return connection;
 }
 
+export async function setConnectorConnectionStatus(
+  store: AppStore,
+  input: {
+    projectId: string;
+    connectionId: string;
+    status: ConnectorConnectionStatus;
+    now?: string | undefined;
+  }
+): Promise<ConnectorConnection> {
+  const connectors = requireConnectors(store.connectors);
+  const existing = await connectors.getConnection(input.projectId, input.connectionId);
+  if (!existing) validation("Connector connection not found.", { projectId: input.projectId, connectionId: input.connectionId });
+  const now = input.now ?? nowIso();
+  const connection: ConnectorConnection = {
+    ...existing,
+    status: input.status,
+    updatedAt: now,
+    archivedAt: input.status === "archived" ? (existing.archivedAt ?? now) : null
+  };
+  await connectors.upsertConnection(connection);
+  return connection;
+}
+
 export async function requestConnectorReconciliation(
   store: AppStore,
   input: ConnectorReconciliationRequestInput

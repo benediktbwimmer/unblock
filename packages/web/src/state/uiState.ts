@@ -105,7 +105,7 @@ function normalizeScrollPositions(input: unknown): Record<string, number> {
 }
 
 function isViewMode(value: unknown): value is ViewMode {
-  return value === "tasks" || value === "queues" || value === "tags" || value === "instructions" || value === "coverage" || value === "activity";
+  return value === "tasks" || value === "queues" || value === "tags" || value === "instructions" || value === "connectors" || value === "coverage" || value === "activity";
 }
 
 function isStatusFilter(value: unknown): value is StatusFilter {

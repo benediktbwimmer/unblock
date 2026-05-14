@@ -223,6 +223,27 @@ describe("hosted authorization", () => {
     });
     expect(listed.status).toBe(200);
     await expect(listed.json()).resolves.toMatchObject([{ id: "github-main", provider: "github" }]);
+
+    const paused = await app.request("/api/connectors/github/connections/github-main/pause?projectId=HOSTED", {
+      method: "POST",
+      headers: hostedHeaders("connector_admin")
+    });
+    expect(paused.status).toBe(200);
+    await expect(paused.json()).resolves.toMatchObject({ id: "github-main", status: "paused" });
+
+    const resumed = await app.request("/api/connectors/github/connections/github-main/resume?projectId=HOSTED", {
+      method: "POST",
+      headers: hostedHeaders("connector_admin")
+    });
+    expect(resumed.status).toBe(200);
+    await expect(resumed.json()).resolves.toMatchObject({ id: "github-main", status: "active" });
+
+    const deleted = await app.request("/api/connectors/github/connections/github-main?projectId=HOSTED", {
+      method: "DELETE",
+      headers: hostedHeaders("connector_admin")
+    });
+    expect(deleted.status).toBe(200);
+    await expect(deleted.json()).resolves.toMatchObject({ id: "github-main", status: "archived" });
   });
 
   it("stores GitHub issue mapping records for connector reconciliation", async () => {
