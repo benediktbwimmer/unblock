@@ -936,15 +936,15 @@ export class TagService {
     await this.store.transaction(async (repos) => {
       const uniqueTaskIds = [...new Set(normalized.map((input) => input.taskId))];
       const taskIds = uniqueTaskIds.length <= 100
-        ? new Set((await Promise.all(uniqueTaskIds.map(async (taskId) =>
+        ? new Set((await collectSequential(uniqueTaskIds, async (taskId) =>
           await repos.tasks.get(this.projectId, taskId) ?? notFound("task", taskId)
-        ))).map((task) => task.id))
+        )).map((task) => task.id))
         : new Set((await repos.tasks.list(this.projectId)).map((task) => task.id));
       const uniqueTagRefs = [...new Set(normalized.flatMap((input) => input.tagIdsOrNames))];
       const tags = uniqueTagRefs.length <= 100
-        ? await Promise.all(uniqueTagRefs.map(async (tagIdOrName) =>
+        ? await collectSequential(uniqueTagRefs, async (tagIdOrName) =>
           await repos.tags.get(this.projectId, normalizeId(tagIdOrName)) ?? await repos.tags.findByName(this.projectId, tagIdOrName) ?? notFound("tag", tagIdOrName)
-        ))
+        )
         : await repos.tags.list(this.projectId);
       const tagsById = new Map(tags.map((tag) => [tag.id, tag]));
       const tagsByName = new Map(tags.map((tag) => [tag.name, tag]));
@@ -972,9 +972,9 @@ export class TagService {
 
       let newTaskTags = taskTags;
       if (repos.tags.hasTaskTag && taskTags.length <= 100) {
-        const existing = await Promise.all(taskTags.map(async (item) =>
+        const existing = await collectSequential(taskTags, async (item) =>
           await repos.tags.hasTaskTag!(this.projectId, item.taskTag.taskId, item.taskTag.tagId)
-        ));
+        );
         newTaskTags = taskTags.filter((_item, index) => !existing[index]);
       }
       if (newTaskTags.length === 0) {
@@ -2919,6 +2919,14 @@ function dependencyKey(taskId: string, dependsOnTaskId: string): string {
 
 function taskTagKey(taskId: string, tagId: string): string {
   return `${taskId}\u0000${tagId}`;
+}
+
+async function collectSequential<T, U>(items: T[], fn: (item: T) => Promise<U>): Promise<U[]> {
+  const results: U[] = [];
+  for (const item of items) {
+    results.push(await fn(item));
+  }
+  return results;
 }
 
 function ensureArray(value: unknown, field: string): unknown[] {

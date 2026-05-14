@@ -23,6 +23,7 @@ import {
   readUnblockConfig,
   readUnblockConfigSync,
   resolveUnblockStorageConfig,
+  runStorageCrudBenchmark,
   slugify,
   updateUnblockConfig,
   type AddTaskInput,
@@ -176,6 +177,47 @@ db.command("migrate")
     try {
       const migration = new MigrationService(store);
       print(await migration.migrate(), format());
+    } finally {
+      await store.close?.();
+    }
+  });
+
+const bench = program.command("bench").description("Benchmark commands");
+
+bench.command("storage")
+  .description("Run a CRUD storage throughput baseline against the configured store")
+  .option("--project-id <id>", "project id to create for this benchmark")
+  .option("--tasks <count>", "tasks to create", parseInteger)
+  .option("--dependencies <count>", "dependencies to create", parseInteger)
+  .option("--tags <count>", "tags to create", parseInteger)
+  .option("--task-tags <count>", "task-tag assignments to create", parseInteger)
+  .option("--instructions <count>", "instructions to create", parseInteger)
+  .option("--comments <count>", "comments to create", parseInteger)
+  .option("--activity <count>", "standalone activity records to append", parseInteger)
+  .action(async (options: {
+    projectId?: string;
+    tasks?: number;
+    dependencies?: number;
+    tags?: number;
+    taskTags?: number;
+    instructions?: number;
+    comments?: number;
+    activity?: number;
+  }) => {
+    const store = await openStore();
+    try {
+      print(await runStorageCrudBenchmark(store, {
+        projectId: options.projectId,
+        machine: "storage-benchmark",
+        actor: program.opts<GlobalOptions>().actor ?? "storage-benchmark",
+        tasks: options.tasks,
+        dependencies: options.dependencies,
+        tags: options.tags,
+        taskTags: options.taskTags,
+        instructions: options.instructions,
+        comments: options.comments,
+        activity: options.activity
+      }), format());
     } finally {
       await store.close?.();
     }

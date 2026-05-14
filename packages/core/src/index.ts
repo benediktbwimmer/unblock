@@ -13,3 +13,4 @@ export * from "./exporters.js";
 export * from "./formatters.js";
 export * from "./config.js";
 export * from "./matcher-query.js";
+export * from "./storage-benchmark.js";

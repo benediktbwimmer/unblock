@@ -39,6 +39,12 @@ The same settings can be supplied with `UNBLOCK_STORAGE_MODE=postgres` and
 `UNBLOCK_POSTGRES_URL=...`. `unblock db status`, `unblock db migrate`, and
 `unblock doctor` report the Postgres migration and health state.
 
+Run the storage CRUD baseline against the configured store:
+
+```sh
+unblock bench storage --tasks 1000 --dependencies 999 --tags 20 --task-tags 1000 --instructions 20 --comments 1000 --activity 1000 --format json
+```
+
 Runtime UI settings live in `~/.unblock/config.json` and are created by
 `unblock serve` if missing:
 
