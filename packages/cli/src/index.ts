@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
@@ -28,6 +29,7 @@ import {
   slugify,
   updateUnblockConfig,
   type AddTaskInput,
+  type AppStore,
   type ComputedStatus,
   type EditInstructionInput,
   type EditQueueFeedInput,
@@ -261,6 +263,39 @@ bench.command("matcher")
     } finally {
       await store.close?.();
     }
+  });
+
+bench.command("matrix")
+  .description("Run the benchmark fixture matrix across SQLite, Postgres, and hosted Postgres modes")
+  .option("--modes <list>", "comma-separated modes: sqlite,postgres,hosted", "sqlite,postgres,hosted")
+  .option("--scenarios <list>", "comma-separated scenarios: storage,matcher", "storage,matcher")
+  .option("--project-prefix <id>", "project id prefix for seeded benchmark projects", "BENCH")
+  .option("--run-id <id>", "stable run id; defaults to the current timestamp")
+  .option("--sqlite-path <path>", "SQLite database path; defaults to a temporary database")
+  .option("--postgres-url <url>", "self-hosted Postgres URL; defaults to --postgres-url/UNBLOCK_POSTGRES_URL")
+  .option("--hosted-postgres-url <url>", "hosted Postgres URL; defaults to the self-hosted Postgres URL")
+  .option("--hosted-tenant-id <id>", "tenant id to use for hosted-mode Postgres", "bench-hosted-tenant")
+  .option("--tasks <count>", "storage scenario task count", parseInteger)
+  .option("--read-tasks <count>", "matcher scenario task count", parseInteger)
+  .option("--iterations <count>", "matcher scenario read iterations", parseInteger)
+  .option("--pollers <count>", "matcher scenario concurrent polling clients", parseInteger)
+  .option("--keep-sqlite", "keep the temporary SQLite database after the run")
+  .action(async (options: {
+    modes: string;
+    scenarios: string;
+    projectPrefix: string;
+    runId?: string;
+    sqlitePath?: string;
+    postgresUrl?: string;
+    hostedPostgresUrl?: string;
+    hostedTenantId: string;
+    tasks?: number;
+    readTasks?: number;
+    iterations?: number;
+    pollers?: number;
+    keepSqlite?: boolean;
+  }) => {
+    print(await runBenchmarkMatrix(options), format());
   });
 
 const configCommand = program.command("config").description("Configuration commands");
@@ -1211,6 +1246,197 @@ async function openStore() {
     return createSqliteStore({ databasePath: storage.sqlitePath, autoMigrate: true });
   }
   return await createPostgresStore({ connectionString: storage.postgresUrl, autoMigrate: true });
+}
+
+type BenchmarkMatrixMode = "sqlite" | "postgres" | "hosted";
+type BenchmarkMatrixScenario = "storage" | "matcher";
+
+interface BenchmarkMatrixCommandOptions {
+  modes: string;
+  scenarios: string;
+  projectPrefix: string;
+  runId?: string | undefined;
+  sqlitePath?: string | undefined;
+  postgresUrl?: string | undefined;
+  hostedPostgresUrl?: string | undefined;
+  hostedTenantId: string;
+  tasks?: number | undefined;
+  readTasks?: number | undefined;
+  iterations?: number | undefined;
+  pollers?: number | undefined;
+  keepSqlite?: boolean | undefined;
+}
+
+interface BenchmarkMatrixCaseReport {
+  mode: BenchmarkMatrixMode;
+  scenario: BenchmarkMatrixScenario;
+  projectId: string;
+  skipped: boolean;
+  skipReason?: string | undefined;
+  database?: string | undefined;
+  tenantId?: string | undefined;
+  report?: unknown;
+  error?: string | undefined;
+}
+
+async function runBenchmarkMatrix(options: BenchmarkMatrixCommandOptions): Promise<{
+  ok: boolean;
+  runId: string;
+  modes: BenchmarkMatrixMode[];
+  scenarios: BenchmarkMatrixScenario[];
+  cases: BenchmarkMatrixCaseReport[];
+}> {
+  const modes = parseBenchmarkMatrixList(options.modes, ["sqlite", "postgres", "hosted"] as const, "mode");
+  const scenarios = parseBenchmarkMatrixList(options.scenarios, ["storage", "matcher"] as const, "scenario");
+  const runId = normalizeBenchmarkRunId(options.runId ?? new Date().toISOString().replace(/[:.]/g, "-"));
+  const projectPrefix = normalizeBenchmarkRunId(options.projectPrefix || "BENCH");
+  const cases: BenchmarkMatrixCaseReport[] = [];
+  const temporaryDirectories: string[] = [];
+
+  try {
+    for (const mode of modes) {
+      for (const scenario of scenarios) {
+        const projectId = `${projectPrefix}-${runId}-${mode}-${scenario}`.toUpperCase();
+        const prepared = await prepareBenchmarkStore(mode, options, temporaryDirectories);
+        if (prepared.skipped) {
+          cases.push({
+            mode,
+            scenario,
+            projectId,
+            skipped: true,
+            skipReason: prepared.skipReason
+          });
+          continue;
+        }
+
+        const store = prepared.store;
+        try {
+          const report = scenario === "storage"
+            ? await runStorageCrudBenchmark(store, {
+              projectId,
+              machine: `${mode}-benchmark`,
+              actor: "benchmark-matrix",
+              tasks: options.tasks
+            })
+            : await runMatcherReadBenchmark(store, {
+              projectId,
+              machine: `${mode}-benchmark`,
+              actor: "benchmark-matrix",
+              tasks: options.readTasks,
+              iterations: options.iterations,
+              pollers: options.pollers
+            });
+          cases.push({
+            mode,
+            scenario,
+            projectId,
+            skipped: false,
+            database: prepared.database,
+            tenantId: prepared.tenantId,
+            report
+          });
+        } catch (error) {
+          cases.push({
+            mode,
+            scenario,
+            projectId,
+            skipped: false,
+            database: prepared.database,
+            tenantId: prepared.tenantId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        } finally {
+          await store.close?.();
+        }
+      }
+    }
+  } finally {
+    if (!options.keepSqlite) {
+      await Promise.all(temporaryDirectories.map((directory) => rm(directory, { recursive: true, force: true })));
+    }
+  }
+
+  return {
+    ok: cases.every((item) => item.skipped || !item.error),
+    runId,
+    modes,
+    scenarios,
+    cases
+  };
+}
+
+async function prepareBenchmarkStore(
+  mode: BenchmarkMatrixMode,
+  options: BenchmarkMatrixCommandOptions,
+  temporaryDirectories: string[]
+): Promise<
+  | { skipped: true; skipReason: string }
+  | { skipped: false; store: AppStore; database: string; tenantId?: string | undefined }
+> {
+  if (mode === "sqlite") {
+    let sqlitePath = options.sqlitePath?.trim();
+    if (!sqlitePath) {
+      const directory = await mkdtemp(join(tmpdir(), "unblock-bench-"));
+      temporaryDirectories.push(directory);
+      sqlitePath = join(directory, "unblock.sqlite");
+    }
+    return {
+      skipped: false,
+      store: createSqliteStore({ databasePath: resolve(sqlitePath), autoMigrate: true }),
+      database: resolve(sqlitePath)
+    };
+  }
+
+  const globalOptions = program.opts<GlobalOptions>();
+  const postgresUrl = mode === "hosted"
+    ? options.hostedPostgresUrl?.trim() || options.postgresUrl?.trim() || globalOptions.postgresUrl?.trim() || process.env.UNBLOCK_POSTGRES_URL?.trim()
+    : options.postgresUrl?.trim() || globalOptions.postgresUrl?.trim() || process.env.UNBLOCK_POSTGRES_URL?.trim();
+  if (!postgresUrl) {
+    return {
+      skipped: true,
+      skipReason: mode === "hosted"
+        ? "No hosted Postgres URL supplied. Pass --hosted-postgres-url, --postgres-url, or UNBLOCK_POSTGRES_URL."
+        : "No Postgres URL supplied. Pass --postgres-url or UNBLOCK_POSTGRES_URL."
+    };
+  }
+
+  const tenantId = mode === "hosted" ? options.hostedTenantId.trim() || "bench-hosted-tenant" : undefined;
+  return {
+    skipped: false,
+    store: await createPostgresStore(tenantId
+      ? { connectionString: postgresUrl, tenantId, autoMigrate: true }
+      : { connectionString: postgresUrl, autoMigrate: true }),
+    database: redactDatabaseUrl(postgresUrl),
+    tenantId
+  };
+}
+
+function parseBenchmarkMatrixList<T extends string>(raw: string, allowed: readonly T[], label: string): T[] {
+  const values = raw.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
+  if (values.length === 0) {
+    throw new UnblockError("validation", `At least one benchmark ${label} is required.`);
+  }
+  const allowedSet = new Set<string>(allowed);
+  for (const value of values) {
+    if (!allowedSet.has(value)) {
+      throw new UnblockError("validation", `Unsupported benchmark ${label}: ${value}. Allowed: ${allowed.join(", ")}.`);
+    }
+  }
+  return values as T[];
+}
+
+function normalizeBenchmarkRunId(value: string): string {
+  return value.trim().replace(/[^A-Za-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "BENCH";
+}
+
+function redactDatabaseUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.password) url.password = "REDACTED";
+    return url.toString();
+  } catch {
+    return value.replace(/:\/\/([^:@]+):([^@]+)@/, "://$1:REDACTED@");
+  }
 }
 
 function databaseLabel(): string {

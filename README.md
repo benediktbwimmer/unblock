@@ -45,6 +45,25 @@ Run the storage CRUD baseline against the configured store:
 unblock bench storage --tasks 1000 --dependencies 999 --tags 20 --task-tags 1000 --instructions 20 --comments 1000 --activity 1000 --format json
 ```
 
+Run the reproducible benchmark matrix across local SQLite plus any supplied
+Postgres targets:
+
+```sh
+unblock --format json bench matrix \
+  --modes sqlite,postgres,hosted \
+  --scenarios storage,matcher \
+  --postgres-url postgres://user:pass@localhost:5432/unblock \
+  --hosted-tenant-id tenant_benchmark \
+  --tasks 1000 \
+  --read-tasks 5000 \
+  --iterations 50 \
+  --pollers 50
+```
+
+If no Postgres URL is supplied, those matrix cases are reported as skipped
+while the SQLite cases still run. Hosted mode uses the same Postgres store with
+a tenant-scoped benchmark identity, matching the hosted deployment storage path.
+
 Runtime UI settings live in `~/.unblock/config.json` and are created by
 `unblock serve` if missing:
 
