@@ -39,4 +39,30 @@ deno test --allow-read packages/connector-flows-app/tests
 deno check packages/connector-flows-app/prism.flow.ts
 ```
 
+Run the real GitHub connector smoke against a disposable repository:
+
+```sh
+UNBLOCK_HOSTED_API_URL=https://unblock.example.com \
+UNBLOCK_HOSTED_API_TOKEN=... \
+UNBLOCK_TENANT_ID=... \
+UNBLOCK_PROJECT_ID=... \
+UNBLOCK_GITHUB_CONNECTION_ID=github-main \
+PRISM_FLOWS_API_URL=https://flows.example.com \
+PRISM_FLOWS_API_TOKEN=... \
+GITHUB_REPOSITORY=owner/repo \
+GITHUB_TOKEN=... \
+deno run --allow-env --allow-net packages/connector-flows-app/scripts/github_smoke.ts
+```
+
+The smoke creates a GitHub issue, starts the `github-issues-inbound` Flow,
+waits for the hosted Unblock task, updates the task, starts the
+`github-issues-outbound` Flow, waits for the GitHub issue update, confirms the
+mapping, and closes the test issue by default. Use `--no-cleanup` to leave the
+issue open for inspection. Use `--allow-missing-env` for CI/preflight jobs that
+should report missing credentials without failing the job.
+
+`GITHUB_TOKEN` is only the smoke runner token for creating, polling, and
+cleaning up the disposable issue. The deployed Flow app still needs its own
+configured `UNBLOCK_HOSTED_API_TOKEN` and `GITHUB_INSTALLATION_TOKEN` secrets.
+
 The app imports the local Prism Flows SDK from `~/code/prism-new3`.
