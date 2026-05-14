@@ -5,6 +5,9 @@ import type {
   HostedAuditEvent,
   HostedIdentity,
   HostedSecret,
+  ConnectorConnection,
+  ConnectorCursorRecord,
+  ConnectorSyncRun,
   Migration,
   Project,
   QueueFeed,
@@ -184,6 +187,21 @@ export interface HostedSecretRepository {
   archive(id: string, archivedAt: string): Promise<void>;
 }
 
+export interface ConnectorRepository {
+  upsertConnection(connection: ConnectorConnection): Promise<void>;
+  getConnection(projectId: string, id: string): Promise<ConnectorConnection | null>;
+  listConnections(projectId?: string | undefined): Promise<ConnectorConnection[]>;
+  upsertCursor(cursor: ConnectorCursorRecord): Promise<void>;
+  listCursors(projectId: string, connectionId: string): Promise<ConnectorCursorRecord[]>;
+  recordSyncRun(run: ConnectorSyncRun): Promise<void>;
+  updateSyncRun(run: ConnectorSyncRun): Promise<void>;
+  listSyncRuns(options: {
+    projectId?: string | undefined;
+    connectionId?: string | undefined;
+    limit?: number | undefined;
+  }): Promise<ConnectorSyncRun[]>;
+}
+
 export interface MatcherQueryRepository {
   matchTaskIds(projectId: string, query: string, filters?: Omit<TaskListFilters, "where">): Promise<string[]>;
   matchingInstructionIds?(
@@ -227,6 +245,7 @@ export interface AppStore extends RepositorySet {
   hostedIdentity?: HostedIdentityRepository;
   hostedAudit?: HostedAuditRepository;
   hostedSecrets?: HostedSecretRepository;
+  connectors?: ConnectorRepository;
   transaction<T>(fn: (repos: RepositorySet) => Promise<T>): Promise<T>;
   close?(): Promise<void> | void;
 }

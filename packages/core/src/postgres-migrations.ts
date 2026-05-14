@@ -409,5 +409,63 @@ export const postgresMigrations: StoreMigration[] = [
       create index if not exists hosted_secrets_project_idx
         on hosted_secrets(tenant_id, project_id, archived_at, updated_at desc);
     `
+  },
+  {
+    id: "pg0004",
+    name: "hosted connector orchestration state",
+    sql: `
+      create table if not exists connector_connections (
+        tenant_id text not null references tenants(id) on delete restrict,
+        project_id text not null,
+        id text not null,
+        provider text not null,
+        display_name text not null,
+        status text not null check (status in ('active', 'paused', 'error', 'archived')),
+        created_at timestamptz not null,
+        updated_at timestamptz not null,
+        archived_at timestamptz null,
+        last_sync_at timestamptz null,
+        last_error_at timestamptz null,
+        metadata_json jsonb not null default '{}'::jsonb,
+        primary key (tenant_id, project_id, id),
+        foreign key (tenant_id, project_id) references projects(tenant_id, id) on delete cascade
+      );
+
+      create index if not exists connector_connections_status_idx
+        on connector_connections(tenant_id, project_id, status, updated_at desc);
+
+      create table if not exists connector_cursors (
+        tenant_id text not null,
+        project_id text not null,
+        connection_id text not null,
+        name text not null,
+        value text not null,
+        observed_at timestamptz not null,
+        updated_at timestamptz not null,
+        primary key (tenant_id, project_id, connection_id, name),
+        foreign key (tenant_id, project_id, connection_id)
+          references connector_connections(tenant_id, project_id, id) on delete cascade
+      );
+
+      create table if not exists connector_sync_runs (
+        tenant_id text not null,
+        project_id text not null,
+        id text primary key,
+        connection_id text not null,
+        run_type text not null check (run_type in ('outbound', 'inbound', 'reconciliation', 'cursor_recovery')),
+        status text not null check (status in ('queued', 'running', 'succeeded', 'failed', 'dead_letter', 'operator_review')),
+        started_at timestamptz not null,
+        finished_at timestamptz null,
+        error_json jsonb null,
+        evidence_json jsonb not null default '{}'::jsonb,
+        foreign key (tenant_id, project_id, connection_id)
+          references connector_connections(tenant_id, project_id, id) on delete cascade
+      );
+
+      create index if not exists connector_sync_runs_connection_idx
+        on connector_sync_runs(tenant_id, project_id, connection_id, started_at desc);
+      create index if not exists connector_sync_runs_status_idx
+        on connector_sync_runs(tenant_id, project_id, status, started_at desc);
+    `
   }
 ];

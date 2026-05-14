@@ -8,10 +8,15 @@ import {
   createHostedSecret,
   defaultUnblockConfigPath,
   formatExplain,
+  applyConnectorInboxEvent,
+  connectorEventSchema,
+  connectorObservabilitySnapshot,
   matcherQueryGrammar,
   MigrationService,
   nowIso,
+  observeConnectorInboxEvent,
   parseHostedSecretKey,
+  requestConnectorReconciliation,
   rotateHostedSecret,
   UnblockError,
   publicUnblockConfig,
@@ -26,7 +31,8 @@ import {
   type TaskListFilters,
   type TaskSize,
   type TaskSort,
-  type HostedSecret
+  type HostedSecret,
+  type ConnectorProvider
 } from "@unblock/core";
 import {
   enforceHostedRateLimit,
@@ -248,6 +254,60 @@ export function createApp(options: ServerOptions = {}) {
     await requireHosted(c);
     await authorizeHosted(c, null);
     return c.json(hostedConfigStatus());
+  });
+
+  app.get("/api/connectors/status", async (c) => {
+    await requireHosted(c);
+    const projectId = c.req.query("projectId")?.trim();
+    await authorizeHosted(c, projectId ?? null);
+    return c.json(await connectorObservabilitySnapshot(c.get("store"), {
+      projectId,
+      recentRunLimit: parseOptionalInteger(c.req.query("limit")) ?? 20
+    }));
+  });
+
+  app.post("/api/connectors/reconcile", async (c) => {
+    const hosted = await requireHosted(c);
+    const body = await c.req.json<{
+      projectId?: string;
+      connectionId?: string;
+      provider?: ConnectorProvider;
+      displayName?: string;
+      reason?: string;
+      cursorName?: string;
+    }>();
+    const projectId = body.projectId?.trim();
+    const connectionId = body.connectionId?.trim();
+    if (!projectId) throw new UnblockError("validation", "projectId is required.");
+    if (!connectionId) throw new UnblockError("validation", "connectionId is required.");
+    if (!body.provider) throw new UnblockError("validation", "provider is required.");
+    await authorizeHosted(c, projectId);
+    const request = await requestConnectorReconciliation(c.get("store"), {
+      tenantId: hosted.identity.tenantId,
+      projectId,
+      connectionId,
+      provider: body.provider,
+      displayName: body.displayName,
+      reason: body.reason,
+      cursorName: body.cursorName
+    });
+    return c.json({
+      connection: request.connection,
+      run: request.run,
+      outboxEventId: request.outboxEvent.id,
+      event: request.event
+    }, 202);
+  });
+
+  app.post("/api/connectors/inbox", async (c) => {
+    await requireHosted(c);
+    const event = connectorEventSchema.parse(await c.req.json());
+    await authorizeHosted(c, event.scope.projectId);
+    const result = await applyConnectorInboxEvent(c.get("store"), event, { source: "prism-flows" });
+    const observation = result.applied
+      ? await observeConnectorInboxEvent(c.get("store"), event, { evidence: result.evidence })
+      : null;
+    return c.json({ ...result, observation });
   });
 
   app.get("/api/tasks", async (c) => {

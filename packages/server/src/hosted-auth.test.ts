@@ -1,6 +1,20 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createMemoryStore, createServices, type AppStore, type HostedSecret } from "@unblock/core";
+import {
+  connectorEvent,
+  createMemoryStore,
+  createServices,
+  type AppStore,
+  type ConnectorConnection,
+  type ConnectorCursorRecord,
+  type ConnectorRepository,
+  type ConnectorSyncRun,
+  type HostedSecret,
+  type InboxEvent,
+  type InboxEventRepository,
+  type OutboxEvent,
+  type OutboxEventRepository
+} from "@unblock/core";
 import { createApp } from "./index.js";
 
 const hostedAuth = {
@@ -126,6 +140,71 @@ describe("hosted authorization", () => {
     }
   });
 
+  it("queues hosted connector reconciliation and exposes connector status", async () => {
+    const store = await seededStore();
+    installConnectorState(store);
+    const app = createApp({ backend: "hosted", storeFactory: () => store, hostedAuth });
+
+    const queued = await app.request("/api/connectors/reconcile", {
+      method: "POST",
+      headers: { ...hostedHeaders("connector_admin"), "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: "HOSTED",
+        connectionId: "github-main",
+        provider: "github",
+        displayName: "GitHub",
+        reason: "test"
+      })
+    });
+
+    expect(queued.status).toBe(202);
+    await expect(queued.json()).resolves.toMatchObject({
+      connection: { id: "github-main", provider: "github" },
+      run: { runType: "reconciliation", status: "queued" }
+    });
+
+    const status = await app.request("/api/connectors/status?projectId=HOSTED", {
+      headers: hostedHeaders("connector_admin")
+    });
+    expect(status.status).toBe(200);
+    await expect(status.json()).resolves.toMatchObject({
+      projectId: "HOSTED",
+      connections: [{ id: "github-main", recentRuns: [{ status: "queued" }] }]
+    });
+  });
+
+  it("applies hosted connector inbox events and records observability", async () => {
+    const store = await seededStore();
+    installConnectorState(store);
+    const app = createApp({ backend: "hosted", storeFactory: () => store, hostedAuth });
+    const event = connectorEvent({
+      kind: "connector.inbound.task_upserted",
+      scope: { tenantId: "ORG_HOSTED", projectId: "HOSTED", connectionId: "github-main", provider: "github" },
+      external: { system: "github", kind: "issue", id: "42", url: "https://github.com/acme/repo/issues/42" },
+      task: { id: "GH-42", title: "Imported GitHub issue", description: "From GitHub", lifecycle: "open", priority: 2 },
+      evidence: {}
+    });
+
+    const applied = await app.request("/api/connectors/inbox", {
+      method: "POST",
+      headers: { ...hostedHeaders("connector_admin"), "content-type": "application/json" },
+      body: JSON.stringify(event)
+    });
+
+    expect(applied.status).toBe(200);
+    await expect(applied.json()).resolves.toMatchObject({ applied: true, duplicate: false });
+    await expect(store.tasks.get("HOSTED", "GH-42")).resolves.toMatchObject({
+      title: "Imported GitHub issue",
+      sourceDoc: "https://github.com/acme/repo/issues/42"
+    });
+    const status = await app.request("/api/connectors/status?projectId=HOSTED", {
+      headers: hostedHeaders("connector_admin")
+    });
+    await expect(status.json()).resolves.toMatchObject({
+      connections: [{ id: "github-main", recentRuns: [{ status: "succeeded" }] }]
+    });
+  });
+
   it("returns hosted operational headers and tenant metrics", async () => {
     const store = await seededStore();
     const app = createApp({ backend: "hosted", storeFactory: () => store, hostedAuth });
@@ -195,6 +274,12 @@ function installProjectRole(store: AppStore, role: string): void {
   };
 }
 
+function installConnectorState(store: AppStore): void {
+  (store as any).connectors = new FakeConnectors();
+  (store as any).outbox = new FakeOutbox();
+  (store as any).inbox = new FakeInbox();
+}
+
 function hostedHeaders(role: string): Record<string, string> {
   return {
     "x-unblock-principal-id": "user_123",
@@ -208,5 +293,138 @@ function restoreEnv(name: string, value: string | undefined): void {
     delete process.env[name];
   } else {
     process.env[name] = value;
+  }
+}
+
+class FakeConnectors implements ConnectorRepository {
+  connections: ConnectorConnection[] = [];
+  cursors: ConnectorCursorRecord[] = [];
+  runs: ConnectorSyncRun[] = [];
+
+  async upsertConnection(connection: ConnectorConnection) {
+    const index = this.connections.findIndex((item) => item.projectId === connection.projectId && item.id === connection.id);
+    if (index >= 0) this.connections[index] = connection;
+    else this.connections.push(connection);
+  }
+
+  async getConnection(projectId: string, id: string) {
+    return this.connections.find((connection) => connection.projectId === projectId && connection.id === id) ?? null;
+  }
+
+  async listConnections(projectId?: string) {
+    return this.connections.filter((connection) => !projectId || connection.projectId === projectId);
+  }
+
+  async upsertCursor(cursor: ConnectorCursorRecord) {
+    const index = this.cursors.findIndex((item) =>
+      item.projectId === cursor.projectId && item.connectionId === cursor.connectionId && item.name === cursor.name
+    );
+    if (index >= 0) this.cursors[index] = cursor;
+    else this.cursors.push(cursor);
+  }
+
+  async listCursors(projectId: string, connectionId: string) {
+    return this.cursors.filter((cursor) => cursor.projectId === projectId && cursor.connectionId === connectionId);
+  }
+
+  async recordSyncRun(run: ConnectorSyncRun) {
+    this.runs.unshift(run);
+  }
+
+  async updateSyncRun(run: ConnectorSyncRun) {
+    const index = this.runs.findIndex((item) => item.projectId === run.projectId && item.connectionId === run.connectionId && item.id === run.id);
+    if (index >= 0) this.runs[index] = run;
+    else this.runs.unshift(run);
+  }
+
+  async listSyncRuns(options: { projectId?: string | undefined; connectionId?: string | undefined; limit?: number | undefined }) {
+    return this.runs
+      .filter((run) => !options.projectId || run.projectId === options.projectId)
+      .filter((run) => !options.connectionId || run.connectionId === options.connectionId)
+      .slice(0, options.limit ?? 100);
+  }
+}
+
+class FakeOutbox implements OutboxEventRepository {
+  events: OutboxEvent[] = [];
+
+  async enqueue(event: OutboxEvent) {
+    this.events.push(event);
+    return event;
+  }
+
+  async get(id: string) {
+    return this.events.find((event) => event.id === id) ?? null;
+  }
+
+  async findByIdempotencyKey(idempotencyKey: string) {
+    return this.events.find((event) => event.idempotencyKey === idempotencyKey) ?? null;
+  }
+
+  async listReady() {
+    return this.events.filter((event) => event.status === "pending" || event.status === "failed");
+  }
+
+  async claim() {
+    return null;
+  }
+
+  async markProcessed() {
+    return null;
+  }
+
+  async markFailed() {
+    return null;
+  }
+
+  async markDead() {
+    return null;
+  }
+}
+
+class FakeInbox implements InboxEventRepository {
+  events: InboxEvent[] = [];
+
+  async receive(event: InboxEvent) {
+    const existing = await this.findBySource(event.source, event.externalEventId);
+    if (existing) return { event: existing, created: false };
+    this.events.push(event);
+    return { event, created: true };
+  }
+
+  async get(id: string) {
+    return this.events.find((event) => event.id === id) ?? null;
+  }
+
+  async findBySource(source: string, externalEventId: string) {
+    return this.events.find((event) => event.source === source && event.externalEventId === externalEventId) ?? null;
+  }
+
+  async markApplying(id: string) {
+    const event = await this.get(id);
+    if (!event) return null;
+    Object.assign(event, { status: "applying" });
+    return event;
+  }
+
+  async markApplied(id: string, appliedAt: string, evidence: Record<string, unknown> = {}) {
+    const event = await this.get(id);
+    if (!event) return null;
+    Object.assign(event, { status: "applied", appliedAt, evidence: { ...event.evidence, ...evidence } });
+    return event;
+  }
+
+  async markFailed(id: string, error: Record<string, unknown>, evidence: Record<string, unknown> = {}) {
+    const event = await this.get(id);
+    if (!event) return null;
+    Object.assign(event, { status: "failed", error, evidence: { ...event.evidence, ...evidence } });
+    return event;
+  }
+
+  async markDead(id: string, error: Record<string, unknown>, evidence: Record<string, unknown> = {}) {
+    const event = await this.get(id);
+    if (!event) return null;
+    Object.assign(event, { status: "dead", error, evidence: { ...event.evidence, ...evidence } });
+    return event;
   }
 }

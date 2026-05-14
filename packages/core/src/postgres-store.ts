@@ -10,6 +10,7 @@ import type {
   HostedAuditRepository,
   HostedIdentityRepository,
   HostedSecretRepository,
+  ConnectorRepository,
   InboxEventRepository,
   MigrationRepository,
   MatcherQueryRepository,
@@ -23,7 +24,7 @@ import type {
   TaskRepository,
   TrackRepository
 } from "./store.js";
-import type { Activity, Comment, Dependency, HostedAuditEvent, HostedIdentity, HostedSecret, InboxEvent, Instruction, Migration, OutboxEvent, Project, QueueFeed, SavedView, Tag, Task, TaskTag, Track, TrackAssignment } from "./types.js";
+import type { Activity, Comment, ConnectorConnection, ConnectorCursorRecord, ConnectorSyncRun, Dependency, HostedAuditEvent, HostedIdentity, HostedSecret, InboxEvent, Instruction, Migration, OutboxEvent, Project, QueueFeed, SavedView, Tag, Task, TaskTag, Track, TrackAssignment } from "./types.js";
 import { nowIso } from "./types.js";
 
 type Queryable = pg.Pool | pg.PoolClient;
@@ -63,6 +64,7 @@ export class PostgresStore implements AppStore {
   readonly hostedIdentity: HostedIdentityRepository;
   readonly hostedAudit: HostedAuditRepository;
   readonly hostedSecrets: HostedSecretRepository;
+  readonly connectors: ConnectorRepository;
 
   constructor(
     private readonly pool: pg.Pool,
@@ -87,6 +89,7 @@ export class PostgresStore implements AppStore {
     this.hostedIdentity = new PostgresHostedIdentityRepository(this.queryable, this.tenantId);
     this.hostedAudit = new PostgresHostedAuditRepository(this.queryable, this.tenantId);
     this.hostedSecrets = new PostgresHostedSecretRepository(this.queryable, this.tenantId);
+    this.connectors = new PostgresConnectorRepository(this.queryable, this.tenantId);
   }
 
   async transaction<T>(fn: (repos: RepositorySet) => Promise<T>): Promise<T> {
@@ -270,6 +273,104 @@ class PostgresHostedSecretRepository implements HostedSecretRepository {
 
   async archive(id: string, archivedAt: string): Promise<void> {
     await this.db.query("update hosted_secrets set archived_at = $3, updated_at = $3 where tenant_id = $1 and id = $2", [this.tenantId, id, archivedAt]);
+  }
+}
+
+class PostgresConnectorRepository implements ConnectorRepository {
+  constructor(private readonly db: Queryable, private readonly tenantId: string) {}
+
+  async upsertConnection(connection: ConnectorConnection): Promise<void> {
+    await this.db.query(`
+      insert into connector_connections (
+        tenant_id, project_id, id, provider, display_name, status, created_at, updated_at,
+        archived_at, last_sync_at, last_error_at, metadata_json
+      ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
+      on conflict (tenant_id, project_id, id) do update set
+        provider = excluded.provider,
+        display_name = excluded.display_name,
+        status = excluded.status,
+        updated_at = excluded.updated_at,
+        archived_at = excluded.archived_at,
+        last_sync_at = excluded.last_sync_at,
+        last_error_at = excluded.last_error_at,
+        metadata_json = excluded.metadata_json
+    `, connectorConnectionParams(this.tenantId, connection));
+  }
+
+  async getConnection(projectId: string, id: string): Promise<ConnectorConnection | null> {
+    const result = await this.db.query("select * from connector_connections where tenant_id = $1 and project_id = $2 and id = $3", [this.tenantId, projectId, id]);
+    return result.rows[0] ? connectorConnectionFromRow(result.rows[0]) : null;
+  }
+
+  async listConnections(projectId?: string): Promise<ConnectorConnection[]> {
+    const result = projectId
+      ? await this.db.query("select * from connector_connections where tenant_id = $1 and project_id = $2 order by updated_at desc, id asc", [this.tenantId, projectId])
+      : await this.db.query("select * from connector_connections where tenant_id = $1 order by project_id asc, updated_at desc, id asc", [this.tenantId]);
+    return result.rows.map(connectorConnectionFromRow);
+  }
+
+  async upsertCursor(cursor: ConnectorCursorRecord): Promise<void> {
+    await this.db.query(`
+      insert into connector_cursors (tenant_id, project_id, connection_id, name, value, observed_at, updated_at)
+      values ($1, $2, $3, $4, $5, $6, $7)
+      on conflict (tenant_id, project_id, connection_id, name) do update set
+        value = excluded.value,
+        observed_at = excluded.observed_at,
+        updated_at = excluded.updated_at
+    `, [this.tenantId, cursor.projectId, cursor.connectionId, cursor.name, cursor.value, cursor.observedAt, cursor.updatedAt]);
+  }
+
+  async listCursors(projectId: string, connectionId: string): Promise<ConnectorCursorRecord[]> {
+    const result = await this.db.query(`
+      select * from connector_cursors
+      where tenant_id = $1 and project_id = $2 and connection_id = $3
+      order by name asc
+    `, [this.tenantId, projectId, connectionId]);
+    return result.rows.map(connectorCursorFromRow);
+  }
+
+  async recordSyncRun(run: ConnectorSyncRun): Promise<void> {
+    await this.db.query(`
+      insert into connector_sync_runs (
+        tenant_id, project_id, id, connection_id, run_type, status, started_at,
+        finished_at, error_json, evidence_json
+      ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
+    `, connectorSyncRunParams(this.tenantId, run));
+  }
+
+  async updateSyncRun(run: ConnectorSyncRun): Promise<void> {
+    await this.db.query(`
+      update connector_sync_runs set
+        run_type = $5,
+        status = $6,
+        started_at = $7,
+        finished_at = $8,
+        error_json = $9::jsonb,
+        evidence_json = $10::jsonb
+      where tenant_id = $1 and project_id = $2 and id = $3 and connection_id = $4
+    `, connectorSyncRunParams(this.tenantId, run));
+  }
+
+  async listSyncRuns(options: { projectId?: string | undefined; connectionId?: string | undefined; limit?: number | undefined }): Promise<ConnectorSyncRun[]> {
+    const limit = Math.min(Math.max(options.limit ?? 100, 1), 1000);
+    const clauses = ["tenant_id = $1"];
+    const params: unknown[] = [this.tenantId];
+    if (options.projectId) {
+      params.push(options.projectId);
+      clauses.push(`project_id = $${params.length}`);
+    }
+    if (options.connectionId) {
+      params.push(options.connectionId);
+      clauses.push(`connection_id = $${params.length}`);
+    }
+    params.push(limit);
+    const result = await this.db.query(`
+      select * from connector_sync_runs
+      where ${clauses.join(" and ")}
+      order by started_at desc
+      limit $${params.length}
+    `, params);
+    return result.rows.map(connectorSyncRunFromRow);
   }
 }
 
@@ -1194,6 +1295,79 @@ function hostedSecretFromRow(row: any): HostedSecret {
     updatedAt: iso(row.updated_at),
     rotatedAt: nullableIso(row.rotated_at),
     archivedAt: nullableIso(row.archived_at)
+  };
+}
+
+function connectorConnectionParams(tenantId: string, connection: ConnectorConnection): unknown[] {
+  return [
+    tenantId,
+    connection.projectId,
+    connection.id,
+    connection.provider,
+    connection.displayName,
+    connection.status,
+    connection.createdAt,
+    connection.updatedAt,
+    connection.archivedAt,
+    connection.lastSyncAt,
+    connection.lastErrorAt,
+    JSON.stringify(connection.metadata)
+  ];
+}
+
+function connectorConnectionFromRow(row: any): ConnectorConnection {
+  return {
+    projectId: row.project_id,
+    id: row.id,
+    provider: row.provider,
+    displayName: row.display_name,
+    status: row.status,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+    archivedAt: nullableIso(row.archived_at),
+    lastSyncAt: nullableIso(row.last_sync_at),
+    lastErrorAt: nullableIso(row.last_error_at),
+    metadata: jsonRecord(row.metadata_json)
+  };
+}
+
+function connectorCursorFromRow(row: any): ConnectorCursorRecord {
+  return {
+    projectId: row.project_id,
+    connectionId: row.connection_id,
+    name: row.name,
+    value: row.value,
+    observedAt: iso(row.observed_at),
+    updatedAt: iso(row.updated_at)
+  };
+}
+
+function connectorSyncRunParams(tenantId: string, run: ConnectorSyncRun): unknown[] {
+  return [
+    tenantId,
+    run.projectId,
+    run.id,
+    run.connectionId,
+    run.runType,
+    run.status,
+    run.startedAt,
+    run.finishedAt,
+    run.error === null ? null : JSON.stringify(run.error),
+    JSON.stringify(run.evidence)
+  ];
+}
+
+function connectorSyncRunFromRow(row: any): ConnectorSyncRun {
+  return {
+    projectId: row.project_id,
+    id: row.id,
+    connectionId: row.connection_id,
+    runType: row.run_type,
+    status: row.status,
+    startedAt: iso(row.started_at),
+    finishedAt: nullableIso(row.finished_at),
+    error: row.error_json === null || row.error_json === undefined ? null : jsonRecord(row.error_json),
+    evidence: jsonRecord(row.evidence_json)
   };
 }
 

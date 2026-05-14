@@ -185,6 +185,58 @@ export interface HostedSecret {
   archivedAt: string | null;
 }
 
+export type ConnectorConnectionStatus = "active" | "paused" | "error" | "archived";
+export type ConnectorSyncRunStatus = "queued" | "running" | "succeeded" | "failed" | "dead_letter" | "operator_review";
+export type ConnectorSyncRunType = "outbound" | "inbound" | "reconciliation" | "cursor_recovery";
+
+export interface ConnectorConnection {
+  projectId: string;
+  id: string;
+  provider: string;
+  displayName: string;
+  status: ConnectorConnectionStatus;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+  lastSyncAt: string | null;
+  lastErrorAt: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface ConnectorCursorRecord {
+  projectId: string;
+  connectionId: string;
+  name: string;
+  value: string;
+  observedAt: string;
+  updatedAt: string;
+}
+
+export interface ConnectorSyncRun {
+  projectId: string;
+  id: string;
+  connectionId: string;
+  runType: ConnectorSyncRunType;
+  status: ConnectorSyncRunStatus;
+  startedAt: string;
+  finishedAt: string | null;
+  error: Record<string, unknown> | null;
+  evidence: Record<string, unknown>;
+}
+
+export interface ConnectorObservabilitySnapshot {
+  projectId: string | null;
+  generatedAt: string;
+  connections: Array<ConnectorConnection & {
+    cursors: ConnectorCursorRecord[];
+    recentRuns: ConnectorSyncRun[];
+    retryCount: number;
+    deadLetterCount: number;
+    lastSuccessAt: string | null;
+    lagMs: number | null;
+  }>;
+}
+
 export interface Instruction {
   projectId: string;
   id: string;
