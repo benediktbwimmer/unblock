@@ -97,8 +97,21 @@ export function normalizePermissions(values: string[], roles: HostedRole[]): Hos
   const explicit = values.map((value) => value.trim().toLowerCase()).filter((permission): permission is HostedPermission =>
     (hostedPermissions as readonly string[]).includes(permission)
   );
-  const rolePermissions = roles.flatMap((role) => permissionByRole[role]);
+  const rolePermissions = permissionsForHostedRoles(roles);
   return [...new Set([...rolePermissions, ...explicit])];
+}
+
+export function permissionsForHostedRoles(roles: HostedRole[]): HostedPermission[] {
+  return [...new Set(roles.flatMap((role) => permissionByRole[role]))];
+}
+
+export function withAdditionalHostedRoles(identity: HostedIdentity, roleValues: string[]): HostedIdentity {
+  const roles = normalizeRoles([...identity.roles, ...roleValues]);
+  return {
+    ...identity,
+    roles,
+    permissions: [...new Set([...identity.permissions, ...permissionsForHostedRoles(roles)])]
+  };
 }
 
 export function hasHostedPermission(identity: HostedIdentity, permission: HostedPermission): boolean {

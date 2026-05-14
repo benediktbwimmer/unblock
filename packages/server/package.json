@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "precheck": "npm run build -w @unblock/core",
     "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
     "dev": "tsx src/index.ts"
   },
   "dependencies": {

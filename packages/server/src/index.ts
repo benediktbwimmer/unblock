@@ -16,6 +16,7 @@ import {
   updateUnblockConfig,
   type ComputedStatus,
   type AppStore,
+  withAdditionalHostedRoles,
   type Lifecycle,
   type Priority,
   type TaskListFilters,
@@ -311,7 +312,18 @@ async function globalMutationServices(c: Context): Promise<ReturnType<typeof cre
 async function authorizeHosted(c: Context, projectId: string | null): Promise<void> {
   const hosted = c.get("hosted");
   if (!hosted) return;
-  await enforceHostedRequest(c.get("store"), hosted, c.req.method, c.req.path, projectId, c.req.raw);
+  const store = c.get("store");
+  let effective = hosted;
+  if (projectId) {
+    const projectRole = await store.hostedIdentity?.projectRole(projectId, hosted.identity.principalId);
+    if (projectRole) {
+      effective = {
+        ...hosted,
+        identity: withAdditionalHostedRoles(hosted.identity, [projectRole])
+      };
+    }
+  }
+  await enforceHostedRequest(store, effective, c.req.method, c.req.path, projectId, c.req.raw);
 }
 
 async function requireConfigIdentity(c: Context): Promise<{ machine: string; actor: string }> {
