@@ -90,6 +90,38 @@ describe("GitHub connector auth model", () => {
     await expect(getGitHubIssueMappingByTask(store, "PROJECT", "github-main", "GH-42")).resolves.toMatchObject({ externalId: "acme/repo#42" });
     await expect(listGitHubIssueMappings(store, { projectId: "PROJECT", connectionId: "github-main" })).resolves.toHaveLength(1);
   });
+
+  it("updates GitHub mappings idempotently for conflict review", async () => {
+    const store = createMemoryStore() as any;
+    store.connectors = new FakeConnectors();
+    const input = {
+      projectId: "PROJECT",
+      connectionId: "github-main",
+      repositoryOwner: "acme",
+      repositoryName: "repo",
+      issueNumber: 42,
+      issueUrl: "https://github.com/acme/repo/issues/42",
+      taskId: "GH-42",
+      externalVersion: "etag-1",
+      localVersion: "1"
+    };
+
+    const first = await upsertGitHubIssueMapping(store, input);
+    const second = await upsertGitHubIssueMapping(store, {
+      ...input,
+      externalVersion: "etag-2",
+      status: "operator_review",
+      metadata: { reason: "version_conflict" }
+    });
+
+    expect(store.connectors.mappings).toHaveLength(1);
+    expect(second.createdAt).toBe(first.createdAt);
+    expect(second).toMatchObject({
+      externalVersion: "etag-2",
+      status: "operator_review",
+      metadata: { reason: "version_conflict" }
+    });
+  });
 });
 
 function secret(id: string, purpose: string): HostedSecret {
