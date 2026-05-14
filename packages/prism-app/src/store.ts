@@ -514,10 +514,10 @@ export class PrismStore implements AppStore {
     );
 
     const entries = await Promise.all(queries.map(async (query) => {
-      const fragment = await this.ensureMatcherFragment(query);
+      const fragment = lowerMatcherQueryToPrismFragment(query, this.options.matcherFragmentLoweringOptions);
       const hasEnabledMaterializedUse = enabledFragmentKeys.has(`${query}\u0000${fragment.fragmentId}`);
-      if (!fragment.lowering.usesDynamicTime && hasEnabledMaterializedUse) {
-        return [query, await this.readMaterializedMatcherTaskIds(fragment, projectId)] as const;
+      if (!fragment.usesDynamicTime && hasEnabledMaterializedUse) {
+        return [query, await this.readMaterializedMatcherTaskIdsBySurfaceId(fragment.fragmentId, projectId)] as const;
       }
       return [query, await this.matchTaskIds(projectId, query, filters)] as const;
     }));
@@ -682,11 +682,15 @@ export class PrismStore implements AppStore {
   }
 
   private async readMaterializedMatcherTaskIds(fragment: AdmittedMatcherFragment, projectId: string): Promise<string[]> {
+    return await this.readMaterializedMatcherTaskIdsBySurfaceId(fragment.fragmentId, projectId);
+  }
+
+  private async readMaterializedMatcherTaskIdsBySurfaceId(surfaceId: string, projectId: string): Promise<string[]> {
     const rows = await this.options.client.readMaterializedSurface<{ task_id: string }>({
       projectId: this.options.projectId,
       shardId: this.options.shardId,
       appId: "unblock",
-      surfaceId: fragment.fragmentId,
+      surfaceId,
       replacementScope: projectId,
       limit: 10_000,
       offset: 0,
@@ -1076,6 +1080,42 @@ class PrismDependencyRepository implements DependencyRepository {
 
   async listDependents(projectId: string, dependsOnTaskId: string): Promise<Dependency[]> {
     return (await this.list(projectId)).filter((dependency) => dependency.dependsOnTaskId === dependsOnTaskId);
+  }
+
+  async hasDependency(projectId: string, taskId: string, dependsOnTaskId: string): Promise<boolean> {
+    if (this.store.canReadMaterializedRows()) {
+      const row = await this.store.materializedRowByOutputKey<DependencyRow>(
+        "taskDependencyRows",
+        projectId,
+        `${projectId}:${taskId}:${dependsOnTaskId}`,
+      );
+      return row !== null;
+    }
+    return (await this.listForTask(projectId, taskId)).some((dependency) => dependency.dependsOnTaskId === dependsOnTaskId);
+  }
+
+  async hasDependencyPath(projectId: string, fromTaskId: string, toTaskId: string): Promise<boolean> {
+    if (this.store.canReadMaterializedRows()) {
+      const row = await this.store.materializedRowByOutputKey<DependencySummaryRow>(
+        "taskDependencySummary",
+        projectId,
+        `${projectId}:${fromTaskId}`,
+      );
+      return row?.dependency_ids.includes(toTaskId) ?? false;
+    }
+    return hasDependencyPath(await this.list(projectId), fromTaskId, toTaskId);
+  }
+
+  async hasHierarchyPath(projectId: string, ancestorTaskId: string, descendantTaskId: string): Promise<boolean> {
+    if (this.store.canReadMaterializedRows()) {
+      const row = await this.store.materializedRowByOutputKey<DescendantSummaryRow>(
+        "descendantSummary",
+        projectId,
+        `${projectId}:${ancestorTaskId}`,
+      );
+      return row?.descendant_ids.includes(descendantTaskId) ?? false;
+    }
+    return hasHierarchyPath(await this.store.tasks.list(projectId), ancestorTaskId, descendantTaskId);
   }
 
   async add(dependency: Dependency): Promise<void> {
@@ -2012,6 +2052,40 @@ function scopedKey(projectId: string, id: string): string {
   return `${projectId}\0${id}`;
 }
 
+function hasDependencyPath(dependencies: Dependency[], fromTaskId: string, toTaskId: string): boolean {
+  const dependenciesByTask = new Map<string, string[]>();
+  for (const dependency of dependencies) {
+    const ids = dependenciesByTask.get(dependency.taskId) ?? [];
+    ids.push(dependency.dependsOnTaskId);
+    dependenciesByTask.set(dependency.taskId, ids);
+  }
+  return reaches(dependenciesByTask, fromTaskId, toTaskId);
+}
+
+function hasHierarchyPath(tasks: Task[], ancestorTaskId: string, descendantTaskId: string): boolean {
+  const childrenByTask = new Map<string, string[]>();
+  for (const task of tasks) {
+    if (!task.parentTaskId) continue;
+    const ids = childrenByTask.get(task.parentTaskId) ?? [];
+    ids.push(task.id);
+    childrenByTask.set(task.parentTaskId, ids);
+  }
+  return reaches(childrenByTask, ancestorTaskId, descendantTaskId);
+}
+
+function reaches(graph: Map<string, string[]>, fromId: string, toId: string): boolean {
+  const pending = [...(graph.get(fromId) ?? [])];
+  const seen = new Set<string>();
+  while (pending.length > 0) {
+    const id = pending.pop()!;
+    if (id === toId) return true;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    pending.push(...(graph.get(id) ?? []));
+  }
+  return false;
+}
+
 function hashJson(value: unknown): string {
   const source = JSON.stringify(value);
   let hash = 2166136261;
@@ -2178,10 +2252,24 @@ type DependencyRow = {
   created_at: string;
 };
 
+type DependencySummaryRow = {
+  project_id: string;
+  task_id: string;
+  dependency_count: number;
+  dependency_ids: string[];
+};
+
 type HierarchyRow = {
   project_id: string;
   parent_task_id: string;
   task_id: string;
+};
+
+type DescendantSummaryRow = {
+  project_id: string;
+  task_id: string;
+  descendants_count: number;
+  descendant_ids: string[];
 };
 
 type TaskLabelRow = {

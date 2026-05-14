@@ -565,6 +565,31 @@ export class DependencyService {
 
     await this.store.transaction(async (repos) => {
       await ensureTaskPair(repos, this.projectId, taskId, dependsOnTaskId);
+      if (repos.dependencies.hasDependency && repos.dependencies.hasDependencyPath && repos.dependencies.hasHierarchyPath) {
+        if (await repos.dependencies.hasDependency(this.projectId, taskId, dependsOnTaskId)) {
+          return;
+        }
+        if (await repos.dependencies.hasDependencyPath(this.projectId, dependsOnTaskId, taskId)) {
+          conflict("Dependency would create a cycle.", { taskId });
+        }
+        if (await repos.dependencies.hasHierarchyPath(this.projectId, taskId, dependsOnTaskId)) {
+          validation("A task cannot depend on one of its descendants because hierarchy already gates parent completion.", {
+            projectId: this.projectId,
+            taskId,
+            dependsOnTaskId,
+          });
+        }
+        if (await repos.dependencies.hasHierarchyPath(this.projectId, dependsOnTaskId, taskId)) {
+          validation("A task cannot depend on one of its ancestors because that would deadlock hierarchy completion.", {
+            projectId: this.projectId,
+            taskId,
+            dependsOnTaskId,
+          });
+        }
+        await repos.dependencies.add(dependency);
+        await repos.activity.append(this.activity.make(this.projectId, "dependency.added", "task", taskId, `${taskId} now depends on ${dependsOnTaskId}`, { taskId, dependsOnTaskId }));
+        return;
+      }
       const dependencies = await repos.dependencies.list(this.projectId);
       const tasks = await repos.tasks.list(this.projectId);
       assertNoCycle(taskId, dependsOnTaskId, dependencies);

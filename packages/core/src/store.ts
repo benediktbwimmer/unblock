@@ -34,6 +34,9 @@ export interface DependencyRepository {
   list(projectId?: string): Promise<Dependency[]>;
   listForTask(projectId: string, taskId: string): Promise<Dependency[]>;
   listDependents(projectId: string, dependsOnTaskId: string): Promise<Dependency[]>;
+  hasDependency?(projectId: string, taskId: string, dependsOnTaskId: string): Promise<boolean>;
+  hasDependencyPath?(projectId: string, fromTaskId: string, toTaskId: string): Promise<boolean>;
+  hasHierarchyPath?(projectId: string, ancestorTaskId: string, descendantTaskId: string): Promise<boolean>;
   add(dependency: Dependency): Promise<void>;
   addMany?(dependencies: Dependency[]): Promise<void>;
   remove(projectId: string, taskId: string, dependsOnTaskId: string): Promise<void>;

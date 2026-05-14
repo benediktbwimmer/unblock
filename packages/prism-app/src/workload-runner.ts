@@ -275,7 +275,7 @@ async function runProjectWorkload(options: RunnerOptions, projectIndex: number):
     }, workload.tags.length));
 
     phases.push(await phase("unblock.tasks.create", async () => {
-      const chunks = chunked(workload.tasks, Math.max(1, Math.ceil(workload.tasks.length / options.concurrency)));
+      const chunks = chunked(workload.tasks, bulkChunkSize(workload.tasks.length, options.concurrency));
       await parallelMap(chunks, options.concurrency, async (chunk) => {
         await services.tasks.addMany(chunk.map((task) => ({
           id: task.id,
@@ -304,7 +304,7 @@ async function runProjectWorkload(options: RunnerOptions, projectIndex: number):
         tags.push(assignment.tagId);
         tagsByTask.set(assignment.taskId, tags);
       }
-      const chunks = chunked([...tagsByTask], Math.max(1, Math.ceil(tagsByTask.size / options.concurrency)));
+      const chunks = chunked([...tagsByTask], bulkChunkSize(tagsByTask.size, options.concurrency));
       await parallelMap(chunks, options.concurrency, async (chunk) => {
         await services.tags.assignMany(
           chunk.map(([taskId, tagIds]) => ({ taskId, tagIdsOrNames: tagIds })),
@@ -822,6 +822,10 @@ function chunked<T>(items: T[], size: number): T[][] {
     chunks.push(items.slice(index, index + size));
   }
   return chunks;
+}
+
+function bulkChunkSize(count: number, concurrency: number): number {
+  return Math.max(250, Math.max(1, Math.ceil(count / concurrency)));
 }
 
 async function stopProcess(child: PrismProcess): Promise<void> {
