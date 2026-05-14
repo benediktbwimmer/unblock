@@ -1,0 +1,25 @@
+# Hosted Unblock Connector Flows
+
+This Prism Flows app is the hosted connector orchestration boundary for
+Unblock. It deliberately does not store Unblock task state in Prism. Unblock
+publishes typed connector events from its Postgres outbox; this Flow app owns
+durable external orchestration and posts resulting connector events back to the
+Unblock inbox.
+
+Current fixture:
+
+- `unblock-connector-dispatch`: manual outbox dispatch plus scheduled
+  reconciliation trigger.
+- `mockConnectorApply`: deterministic mock connector job used to review the
+  Flow boundary before GitHub Issues is implemented.
+- `unblock-hosted-api`: redacted bearer-token connection to hosted Unblock.
+- `mock-external`: redacted API-key connection for the mocked connector target.
+
+Run locally:
+
+```sh
+deno test --allow-read packages/connector-flows-app/tests
+deno check packages/connector-flows-app/prism.flow.ts
+```
+
+The app imports the local Prism Flows SDK from `~/code/prism-new3`.
