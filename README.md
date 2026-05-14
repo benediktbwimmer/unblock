@@ -10,8 +10,8 @@ This repository is a TypeScript workspace with four packages:
 - `@unblock/web`: React/Vite UI for the ready queue, task details, tracks, tags, and activity.
 
 The core service layer depends on `AppStore` repository interfaces, not SQLite.
-The V1 concrete store is `createSqliteStore`, and a future Postgres store should
-only need to implement the same repositories and transaction contract.
+Unblock supports a local SQLite store and a Postgres store for shared
+self-hosted deployments.
 
 ## Quick Start
 
@@ -26,6 +26,18 @@ unblock task list --status ready
 
 By default the SQLite database lives at `~/.unblock/unblock.sqlite`. Override
 it with `--db` or `UNBLOCK_DB`.
+
+For a shared self-hosted Postgres instance, point Unblock at a connection URL:
+
+```sh
+unblock config set --storage-mode postgres --postgres-url postgres://user:pass@host:5432/unblock
+unblock db status
+unblock serve
+```
+
+The same settings can be supplied with `UNBLOCK_STORAGE_MODE=postgres` and
+`UNBLOCK_POSTGRES_URL=...`. `unblock db status`, `unblock db migrate`, and
+`unblock doctor` report the Postgres migration and health state.
 
 Runtime UI settings live in `~/.unblock/config.json` and are created by
 `unblock serve` if missing:

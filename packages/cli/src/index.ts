@@ -8,6 +8,7 @@ import { Command, Option } from "commander";
 import { parse as parseYaml } from "yaml";
 import {
   createServices,
+  createPostgresStore,
   createSqliteStore,
   defaultUnblockConfigPath,
   ensureUnblockConfig,
@@ -115,14 +116,15 @@ program.command("serve")
 program.command("doctor")
   .description("Check local configuration")
   .action(async () => {
-    const store = openStore();
+    const store = await openStore();
     try {
       const migration = new MigrationService(store);
       const status = await migration.status();
       const config = await readUnblockConfig(configPath());
       print({
-        database: dbPath(),
+        database: databaseLabel(),
         storage: storageConfig(config.config),
+        capabilities: store.capabilities,
         config: {
           path: config.path,
           exists: config.exists,
@@ -142,11 +144,11 @@ const db = program.command("db").description("Database maintenance");
 db.command("init")
   .description("Create or migrate the database")
   .action(async () => {
-    const store = openStore();
+    const store = await openStore();
     try {
       const migration = new MigrationService(store);
       const status = await migration.migrate();
-      console.log(`Database ready: ${dbPath()}`);
+      console.log(`Database ready: ${databaseLabel()}`);
       console.log(`Applied: ${status.applied.length}`);
       console.log(`Pending: ${status.pending.length}`);
     } finally {
@@ -157,7 +159,7 @@ db.command("init")
 db.command("status")
   .description("Show migration status")
   .action(async () => {
-    const store = openStore();
+    const store = await openStore();
     try {
       const migration = new MigrationService(store);
       const status = await migration.status();
@@ -170,7 +172,7 @@ db.command("status")
 db.command("migrate")
   .description("Run migrations")
   .action(async () => {
-    const store = openStore();
+    const store = await openStore();
     try {
       const migration = new MigrationService(store);
       print(await migration.migrate(), format());
@@ -1121,16 +1123,17 @@ program.parseAsync(process.argv).catch((error: unknown) => {
   process.exit(1);
 });
 
-function openStore() {
+async function openStore() {
   const storage = storageConfig();
-  if (storage.mode !== "sqlite") {
-    throw new UnblockError("validation", `Storage mode ${storage.mode} is configured, but the ${storage.mode} store is not implemented yet.`);
+  if (storage.mode === "sqlite") {
+    return createSqliteStore({ databasePath: storage.sqlitePath, autoMigrate: true });
   }
-  return createSqliteStore({ databasePath: storage.sqlitePath, autoMigrate: true });
+  return await createPostgresStore({ connectionString: storage.postgresUrl, autoMigrate: true });
 }
 
-function dbPath(): string {
-  return storageConfig().sqlitePath;
+function databaseLabel(): string {
+  const storage = storageConfig();
+  return storage.mode === "sqlite" ? storage.sqlitePath : storage.postgresUrl ?? "(not configured)";
 }
 
 function storageConfig(config = readUnblockConfigSync(configPath()).config) {
@@ -1155,7 +1158,7 @@ function format(): OutputFormat {
 }
 
 async function withServices<T>(fn: (context: { services: ReturnType<typeof createServices> }) => Promise<T>): Promise<T> {
-  const store = openStore();
+  const store = await openStore();
   try {
     const projectId = requiredProjectId();
     if (!await store.projects.get(projectId)) {
@@ -1168,7 +1171,7 @@ async function withServices<T>(fn: (context: { services: ReturnType<typeof creat
 }
 
 async function withMutationServices<T>(fn: (context: { services: ReturnType<typeof createServices> }) => Promise<T>): Promise<T> {
-  const store = openStore();
+  const store = await openStore();
   try {
     const projectId = requiredProjectId();
     if (!await store.projects.get(projectId)) {
@@ -1182,7 +1185,7 @@ async function withMutationServices<T>(fn: (context: { services: ReturnType<type
 }
 
 async function withGlobalServices<T>(fn: (context: { services: ReturnType<typeof createServices> }) => Promise<T>): Promise<T> {
-  const store = openStore();
+  const store = await openStore();
   try {
     return await fn({ services: createServices(store) });
   } finally {
@@ -1191,7 +1194,7 @@ async function withGlobalServices<T>(fn: (context: { services: ReturnType<typeof
 }
 
 async function withGlobalMutationServices<T>(fn: (context: { services: ReturnType<typeof createServices> }) => Promise<T>): Promise<T> {
-  const store = openStore();
+  const store = await openStore();
   try {
     const provenance = await requiredProvenance();
     return await fn({ services: createServices(store, provenance) });

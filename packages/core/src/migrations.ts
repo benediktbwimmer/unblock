@@ -1,6 +1,7 @@
 import type { AppStore, RepositorySet } from "./store.js";
 import type { Migration } from "./types.js";
 import { DEFAULT_PROJECT_ID, nowIso } from "./types.js";
+import { postgresMigrations } from "./postgres-migrations.js";
 
 export interface StoreMigration {
   id: string;
@@ -432,7 +433,7 @@ export class MigrationService {
   async status(): Promise<{ applied: Migration[]; pending: StoreMigration[] }> {
     const applied = await this.store.migrations.list();
     const appliedIds = new Set(applied.map((migration) => migration.id));
-    const pending = sqliteMigrations.filter((migration) => !appliedIds.has(migration.id));
+    const pending = this.migrations().filter((migration) => !appliedIds.has(migration.id));
     return { applied, pending };
   }
 
@@ -441,7 +442,7 @@ export class MigrationService {
       return this.status();
     }
 
-    for (const migration of sqliteMigrations) {
+    for (const migration of this.migrations()) {
       const existing = await this.store.migrations.list();
       if (existing.some((item) => item.id === migration.id)) {
         continue;
@@ -457,5 +458,11 @@ export class MigrationService {
     }
 
     return this.status();
+  }
+
+  private migrations(): StoreMigration[] {
+    return this.store.capabilities?.dialect === "postgres" || this.store.capabilities?.dialect === "hosted"
+      ? postgresMigrations
+      : sqliteMigrations;
   }
 }
