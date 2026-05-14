@@ -16,6 +16,28 @@ export const githubInboundResultSchema = schemas.object({
   mapping: schemas.record(schemas.unknown()).optional(),
 });
 
+export const githubOutboundInputSchema = schemas.object({
+  trigger: schemas.record(schemas.unknown()),
+  task: schemas.record(schemas.unknown()),
+  connections: schemas.array(schemas.record(schemas.unknown())),
+});
+
+export const githubOutboundPreparedSchema = schemas.object({
+  request: schemas.record(schemas.unknown()),
+  connection: schemas.record(schemas.unknown()),
+  task: schemas.record(schemas.unknown()),
+  idempotencyKey: schemas.string(),
+});
+
+export const githubOutboundFinalizeInputSchema = schemas.object({
+  prepared: githubOutboundPreparedSchema,
+  response: schemas.record(schemas.unknown()),
+});
+
+export const githubOutboundFinalizeResultSchema = schemas.object({
+  mapping: schemas.record(schemas.unknown()),
+});
+
 job("normalizeGitHubIssueWebhook", {
   runtime: "deno",
   batch: { mode: "scalar" },
@@ -83,6 +105,86 @@ job("normalizeGitHubIssueWebhook", {
   },
 });
 
+job("prepareGitHubIssueOutbound", {
+  runtime: "deno",
+  batch: { mode: "scalar" },
+  input: githubOutboundInputSchema,
+  output: githubOutboundPreparedSchema,
+  permissions: { net: [], secrets: [], imports: [] },
+  run: ({ input }: { input: any }) => {
+    const event = input.trigger.event;
+    const task = input.task;
+    const connection = input.connections.find((item: any) => item.id === event.scope.connectionId) ?? input.connections[0];
+    if (!connection?.metadata) {
+      throw new Error(`No GitHub connection metadata available for ${event.scope.connectionId}`);
+    }
+    const metadata = connection.metadata;
+    const owner = metadata.repositoryOwner;
+    const repo = metadata.repositoryName;
+    const existingIssue = parseIssueNumber(event.external?.id) ?? parseIssueNumber(task.sourceAnchor);
+    const title = task.title ?? event.task?.title ?? event.local?.id;
+    const body = task.description ?? event.task?.description ?? "";
+    const request = existingIssue
+      ? {
+        method: "PATCH",
+        path: `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${existingIssue}`,
+        body: {
+          title,
+          body,
+          state: task.lifecycle === "finished" ? "closed" : "open",
+        },
+      }
+      : {
+        method: "POST",
+        path: `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`,
+        body: {
+          title,
+          body,
+        },
+      };
+    return {
+      request,
+      connection,
+      task,
+      idempotencyKey: `${event.idempotencyKey}:github:${existingIssue ?? "create"}`,
+    };
+  },
+});
+
+job("finalizeGitHubIssueOutbound", {
+  runtime: "deno",
+  batch: { mode: "scalar" },
+  input: githubOutboundFinalizeInputSchema,
+  output: githubOutboundFinalizeResultSchema,
+  permissions: { net: [], secrets: [], imports: [] },
+  run: ({ input }: { input: any }) => {
+    const issue = input.response;
+    const metadata = input.prepared.connection.metadata;
+    const task = input.prepared.task;
+    return {
+      mapping: {
+        projectId: task.projectId,
+        connectionId: input.prepared.connection.id,
+        repositoryOwner: metadata.repositoryOwner,
+        repositoryName: metadata.repositoryName,
+        issueNumber: Number(issue.number),
+        issueNodeId: issue.node_id ?? undefined,
+        issueUrl: issue.html_url,
+        taskId: task.id,
+        externalVersion: issue.updated_at ?? null,
+        localVersion: String(task.version ?? ""),
+        syncDirection: metadata.syncDirection ?? "bidirectional",
+        conflictPolicy: metadata.conflictPolicy ?? "operator_review",
+        status: "active",
+        metadata: {
+          outbound: true,
+          githubState: issue.state ?? null,
+        },
+      },
+    };
+  },
+});
+
 function taskPayload(issue: any, taskId: string) {
   return {
     id: taskId,
@@ -114,6 +216,14 @@ function issueMapping(input: any, owner: string, repo: string, issue: any, taskI
       githubAction: input.payload.action ?? "unknown",
     },
   };
+}
+
+function parseIssueNumber(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const match = value.match(/#(\d+)$/);
+  if (!match?.[1]) return null;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function deadLetter(input: any, code: string, message: string) {

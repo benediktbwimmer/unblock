@@ -15,9 +15,16 @@ Current fixture:
 - `github-issues-inbound`: GitHub `issues` webhook ingestion with Prism trigger
   signature metadata, delivery dedupe, issue-to-task mapping, and Unblock inbox
   application.
+- `github-issues-outbound`: Unblock outbox-triggered task sync to GitHub Issues
+  with task/config lookup, rate-limited GitHub API calls, idempotency, and
+  mapping writeback.
 - `normalizeGitHubIssueWebhook`: deterministic webhook normalizer that converts
   GitHub issue payloads into typed Unblock connector events and mapping writes.
+- `prepareGitHubIssueOutbound` / `finalizeGitHubIssueOutbound`: deterministic
+  request shaping and mapping finalization for outbound GitHub sync.
 - `unblock-hosted-api`: redacted bearer-token connection to hosted Unblock.
+- `github-api`: rate-limited GitHub REST API connection for installation-token
+  issue writes.
 - `mock-external`: redacted API-key connection for the mocked connector target.
 
 Run locally:
