@@ -9,9 +9,7 @@ export function lowerPostgresMatcherTaskIds(projectId: string, query: string, fi
   const plan = parseMatcherPlan(query, filters);
   const builder = new SqlBuilder(1);
   const conditions = ["t.tenant_id = $1", builder.param(projectId, "t.project_id = $")];
-  if (!plan.filters.includeArchived) {
-    conditions.push("t.archived_at is null");
-  }
+  conditions.push("t.archived_at is null");
   if (!plan.filters.includeFinished) {
     conditions.push("t.lifecycle != 'finished'");
   }
