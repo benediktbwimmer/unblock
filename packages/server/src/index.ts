@@ -5,13 +5,13 @@ import {
   createServices,
   createSqliteStore,
   defaultUnblockConfigPath,
-  defaultUnblockDbPath,
   formatExplain,
   matcherQueryGrammar,
   MigrationService,
   UnblockError,
   publicUnblockConfig,
   readUnblockConfig,
+  resolveUnblockStorageConfig,
   updateUnblockConfig,
   type ComputedStatus,
   type AppStore,
@@ -22,11 +22,12 @@ import {
   type TaskSort
 } from "@unblock/core";
 
-export type UnblockBackend = "sqlite" | "prism";
+export type UnblockBackend = "sqlite" | "postgres" | "hosted" | "prism";
 
 export interface ServerOptions {
   backend?: UnblockBackend | undefined;
   databasePath?: string | undefined;
+  postgresUrl?: string | undefined;
   configPath?: string | undefined;
   storeFactory?: (() => AppStore | Promise<AppStore>) | undefined;
 }
@@ -314,11 +315,27 @@ async function openStore(options: ServerOptions): Promise<AppStore> {
     return await options.storeFactory();
   }
 
-  const backend = resolveBackend(options.backend ?? process.env.UNBLOCK_BACKEND);
-  if (backend === "sqlite") {
-    return createSqliteStore(defined({ databasePath: options.databasePath, autoMigrate: true }));
+  const backend = options.backend ?? process.env.UNBLOCK_BACKEND;
+  if ((backend ?? "").trim().toLowerCase() === "prism") {
+    return openLegacyPrismStore();
   }
 
+  const config = await readUnblockConfig(options.configPath ?? process.env.UNBLOCK_CONFIG ?? defaultUnblockConfigPath());
+  const storage = resolveUnblockStorageConfig(config.config, process.env, {
+    mode: backend,
+    sqlitePath: options.databasePath,
+    postgresUrl: options.postgresUrl
+  });
+  if (storage.mode === "sqlite") {
+    return createSqliteStore(defined({ databasePath: storage.sqlitePath, autoMigrate: true }));
+  }
+  throw new UnblockError(
+    "validation",
+    `Storage mode ${storage.mode} is configured, but the ${storage.mode} store is not implemented yet.`
+  );
+}
+
+async function openLegacyPrismStore(): Promise<AppStore> {
   const moduleName = process.env.UNBLOCK_PRISM_STORE_MODULE ?? "@unblock/prism-app/store";
   try {
     const storeModule = await import(moduleName) as {
@@ -351,17 +368,6 @@ async function openStore(options: ServerOptions): Promise<AppStore> {
       `UNBLOCK_BACKEND=prism requires a Prism AppStore module. Set UNBLOCK_PRISM_STORE_MODULE or pass ServerOptions.storeFactory. Cause: ${message}`
     );
   }
-}
-
-function resolveBackend(value: string | undefined): UnblockBackend {
-  const normalized = (value ?? "sqlite").trim().toLowerCase();
-  if (normalized === "sqlite" || normalized === "local") {
-    return "sqlite";
-  }
-  if (normalized === "prism" || normalized === "hosted") {
-    return "prism";
-  }
-  throw new UnblockError("validation", `Unsupported UNBLOCK_BACKEND: ${value}`);
 }
 
 function parseOptionalPriority(value: string | undefined): Priority | undefined {
@@ -402,7 +408,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const port = Number(process.env.PORT ?? process.env.UNBLOCK_API_PORT ?? 39217);
   serve({
     fetch: createApp({
-      databasePath: process.env.UNBLOCK_DB ?? defaultUnblockDbPath(),
+      databasePath: process.env.UNBLOCK_DB,
+      postgresUrl: process.env.UNBLOCK_POSTGRES_URL,
       configPath: process.env.UNBLOCK_CONFIG ?? defaultUnblockConfigPath()
     }).fetch,
     port

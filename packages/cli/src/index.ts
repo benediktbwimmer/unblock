@@ -10,7 +10,6 @@ import {
   createServices,
   createSqliteStore,
   defaultUnblockConfigPath,
-  defaultUnblockDbPath,
   ensureUnblockConfig,
   formatActivity,
   formatExplain,
@@ -21,6 +20,8 @@ import {
   UnblockError,
   prioritySchema,
   readUnblockConfig,
+  readUnblockConfigSync,
+  resolveUnblockStorageConfig,
   slugify,
   updateUnblockConfig,
   type AddTaskInput,
@@ -42,6 +43,8 @@ interface GlobalOptions {
   format?: OutputFormat;
   project?: string;
   actor?: string;
+  storageMode?: string;
+  postgresUrl?: string;
 }
 
 const DEFAULT_API_PORT = 39217;
@@ -65,6 +68,8 @@ program
   .description("Dependency-first implementation task manager")
   .version("0.1.0")
   .option("--db <path>", "SQLite database path", process.env.UNBLOCK_DB)
+  .option("--storage-mode <mode>", "storage mode: sqlite, postgres, or hosted", process.env.UNBLOCK_STORAGE_MODE)
+  .option("--postgres-url <url>", "Postgres connection URL", process.env.UNBLOCK_POSTGRES_URL)
   .option("--project <id>", "project id for task, dependency, tag, queue, import, export, and activity commands")
   .option("--actor <name>", "actor identity for mutating commands; required for provenance")
   .addOption(new Option("--format <format>", "output format").choices(["table", "json", "markdown"]).default("table"));
@@ -76,18 +81,21 @@ program.command("serve")
   .option("--host <host>", "web server host", "0.0.0.0")
   .action(async (options: { apiPort: number; webPort: number; host: string }) => {
     const root = findWorkspaceRoot();
-    const databasePath = dbPath();
     const config = await ensureUnblockConfig(configPath());
+    const storage = storageConfig(config.config);
     const env = {
       ...process.env,
-      UNBLOCK_DB: databasePath,
+      UNBLOCK_STORAGE_MODE: storage.mode,
+      UNBLOCK_DB: storage.sqlitePath,
       UNBLOCK_CONFIG: config.path,
+      UNBLOCK_POSTGRES_URL: storage.postgresUrl,
       UNBLOCK_API_PORT: String(options.apiPort),
       UNBLOCK_WEB_PORT: String(options.webPort),
       UNBLOCK_WEB_HOST: options.host
     };
 
-    console.log(`Database: ${databasePath}`);
+    console.log(`Storage:  ${storage.mode}`);
+    console.log(`Database: ${storage.mode === "sqlite" ? storage.sqlitePath : storage.postgresUrl || "(not configured)"}`);
     console.log(`Config:   ${config.path}`);
     for (const issue of config.issues) {
       console.log(`Config warning: ${issue}`);
@@ -114,6 +122,7 @@ program.command("doctor")
       const config = await readUnblockConfig(configPath());
       print({
         database: dbPath(),
+        storage: storageConfig(config.config),
         config: {
           path: config.path,
           exists: config.exists,
@@ -180,16 +189,26 @@ configCommand.command("show")
   });
 
 configCommand.command("set")
-  .description("Set local machine or UI actor identity")
+  .description("Set local machine, UI actor identity, or storage settings")
   .option("--machine <name>", "stable machine name")
   .option("--actor <name>", "default UI actor name")
-  .action(async (options: { machine?: string; actor?: string }) => {
+  .option("--storage-mode <mode>", "storage mode: sqlite, postgres, or hosted")
+  .option("--sqlite-path <path>", "SQLite database path for local mode")
+  .option("--postgres-url <url>", "Postgres connection URL for postgres or hosted mode")
+  .action(async (options: { machine?: string; actor?: string; storageMode?: string; sqlitePath?: string; postgresUrl?: string }) => {
     const current = await readUnblockConfig(configPath());
     const actor = options.actor ?? program.opts<GlobalOptions>().actor;
     const next = await updateUnblockConfig({
       identity: {
         machine: options.machine === undefined ? current.config.identity.machine : options.machine,
         actor: actor === undefined ? current.config.identity.actor : actor
+      },
+      storage: {
+        mode: options.storageMode === undefined
+          ? current.config.storage.mode
+          : resolveUnblockStorageConfig(current.config, {}, { mode: options.storageMode }).mode,
+        sqlitePath: options.sqlitePath === undefined ? current.config.storage.sqlitePath : options.sqlitePath,
+        postgresUrl: options.postgresUrl === undefined ? current.config.storage.postgresUrl : options.postgresUrl
       }
     }, configPath());
     print({ path: next.path, value: next.config }, format());
@@ -1103,11 +1122,28 @@ program.parseAsync(process.argv).catch((error: unknown) => {
 });
 
 function openStore() {
-  return createSqliteStore({ databasePath: dbPath(), autoMigrate: true });
+  const storage = storageConfig();
+  if (storage.mode !== "sqlite") {
+    throw new UnblockError("validation", `Storage mode ${storage.mode} is configured, but the ${storage.mode} store is not implemented yet.`);
+  }
+  return createSqliteStore({ databasePath: storage.sqlitePath, autoMigrate: true });
 }
 
 function dbPath(): string {
-  return resolve(program.opts<GlobalOptions>().db ?? process.env.UNBLOCK_DB ?? defaultUnblockDbPath());
+  return storageConfig().sqlitePath;
+}
+
+function storageConfig(config = readUnblockConfigSync(configPath()).config) {
+  const options = program.opts<GlobalOptions>();
+  const storage = resolveUnblockStorageConfig(config, process.env, {
+    mode: options.storageMode,
+    sqlitePath: options.db,
+    postgresUrl: options.postgresUrl
+  });
+  return {
+    ...storage,
+    sqlitePath: resolve(storage.sqlitePath)
+  };
 }
 
 function configPath(): string {
