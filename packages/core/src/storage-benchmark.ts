@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { AppStore } from "./store.js";
-import type { AddTaskInput, JsonExport, TaskSize } from "./types.js";
+import type { AddTaskInput, HostedAuditEvent, JsonExport, TaskSize } from "./types.js";
 import { createServices } from "./services.js";
 
 export interface StorageCrudBenchmarkOptions {
@@ -8,12 +9,15 @@ export interface StorageCrudBenchmarkOptions {
   machine?: string | undefined;
   actor?: string | undefined;
   tasks?: number | undefined;
+  updates?: number | undefined;
   dependencies?: number | undefined;
+  dependencyMutations?: number | undefined;
   tags?: number | undefined;
   taskTags?: number | undefined;
   instructions?: number | undefined;
   comments?: number | undefined;
   activity?: number | undefined;
+  audit?: number | undefined;
 }
 
 export interface StorageCrudBenchmarkPhase {
@@ -34,12 +38,15 @@ export interface StorageCrudBenchmarkReport {
   projectId: string;
   counts: {
     tasks: number;
+    updates: number;
     dependencies: number;
+    dependencyMutations: number;
     tags: number;
     taskTags: number;
     instructions: number;
     comments: number;
     activity: number;
+    audit: number;
   };
   phases: StorageCrudBenchmarkPhase[];
   totals: {
@@ -100,12 +107,15 @@ export async function runStorageCrudBenchmark(store: AppStore, options: StorageC
   const machine = options.machine?.trim() || "storage-benchmark";
   const actor = options.actor?.trim() || "storage-benchmark";
   const taskCount = positiveInteger(options.tasks, 1000);
+  const updateCount = Math.min(positiveInteger(options.updates, taskCount), taskCount);
   const tagCount = positiveInteger(options.tags, Math.min(20, taskCount));
   const dependencyCount = Math.min(positiveInteger(options.dependencies, Math.max(0, taskCount - 1)), Math.max(0, taskCount - 1));
+  const dependencyMutationCount = Math.min(positiveInteger(options.dependencyMutations, Math.min(dependencyCount, Math.max(0, taskCount - 2))), Math.max(0, taskCount - 2));
   const taskTagCount = Math.min(positiveInteger(options.taskTags, taskCount), taskCount * Math.max(1, tagCount));
   const instructionCount = positiveInteger(options.instructions, tagCount);
   const commentCount = Math.min(positiveInteger(options.comments, taskCount), taskCount);
   const activityCount = positiveInteger(options.activity, taskCount);
+  const auditCount = store.hostedAudit ? positiveInteger(options.audit, taskCount) : 0;
   const phases: StorageCrudBenchmarkPhase[] = [];
   const startedAt = performance.now();
 
@@ -135,12 +145,28 @@ export async function runStorageCrudBenchmark(store: AppStore, options: StorageC
     await services.tasks.addMany(tasks);
   });
 
+  await measure(phases, "tasks.update", updateCount, async () => {
+    for (let index = 0; index < updateCount; index += 1) {
+      await services.tasks.edit(taskId(index), {
+        title: `Benchmark task ${index} updated`,
+        description: `Synthetic storage benchmark task ${index}; updated during CRUD benchmark.`,
+        priority: ((index + 1) % 5) as 0 | 1 | 2 | 3 | 4
+      });
+    }
+  });
+
   const dependencies = Array.from({ length: dependencyCount }, (_item, index) => ({
     taskId: taskId(index + 1),
     dependsOnTaskId: taskId(index)
   }));
   await measure(phases, "dependencies.create", dependencies.length, async () => {
     await services.dependencies.addMany(dependencies);
+  });
+
+  await measure(phases, "dependencies.mutate", dependencyMutationCount, async () => {
+    for (let index = 0; index < dependencyMutationCount; index += 1) {
+      await services.dependencies.set(taskId(index + 2), [taskId(0)]);
+    }
   });
 
   const taskTags = Array.from({ length: taskTagCount }, (_item, index) => ({
@@ -178,6 +204,14 @@ export async function runStorageCrudBenchmark(store: AppStore, options: StorageC
     })));
   });
 
+  if (store.hostedAudit && auditCount > 0) {
+    await measure(phases, "audit.append", auditCount, async () => {
+      for (let index = 0; index < auditCount; index += 1) {
+        await store.hostedAudit?.append(hostedAuditEvent(projectId, actor, index));
+      }
+    });
+  }
+
   const elapsedMs = roundMs(performance.now() - startedAt);
   const operations = phases.reduce((sum, phase) => sum + phase.count, 0);
   return {
@@ -191,12 +225,15 @@ export async function runStorageCrudBenchmark(store: AppStore, options: StorageC
     projectId,
     counts: {
       tasks: taskCount,
+      updates: updateCount,
       dependencies: dependencyCount,
+      dependencyMutations: dependencyMutationCount,
       tags: tagCount,
       taskTags: taskTagCount,
       instructions: instructionCount,
       comments: commentCount,
-      activity: activityCount
+      activity: activityCount,
+      audit: auditCount
     },
     phases,
     totals: {
@@ -356,6 +393,24 @@ function normalizeProjectId(value: string): string {
 
 function taskId(index: number): string {
   return `T-${index.toString().padStart(6, "0")}`;
+}
+
+function hostedAuditEvent(projectId: string, actor: string, index: number): HostedAuditEvent {
+  return {
+    tenantId: "benchmark-tenant",
+    projectId,
+    id: randomUUID(),
+    eventType: "benchmark.audit",
+    principalId: actor,
+    subjectType: "task",
+    subjectId: taskId(index),
+    message: `Benchmark audit ${index}`,
+    data: { index },
+    requestId: `benchmark-${index}`,
+    ipAddress: null,
+    userAgent: "unblock-benchmark",
+    createdAt: new Date().toISOString()
+  };
 }
 
 function matcherBenchmarkData(options: {

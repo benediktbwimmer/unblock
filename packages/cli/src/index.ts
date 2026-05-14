@@ -191,21 +191,27 @@ bench.command("storage")
   .description("Run a CRUD storage throughput baseline against the configured store")
   .option("--project-id <id>", "project id to create for this benchmark")
   .option("--tasks <count>", "tasks to create", parseInteger)
+  .option("--updates <count>", "task updates to apply", parseInteger)
   .option("--dependencies <count>", "dependencies to create", parseInteger)
+  .option("--dependency-mutations <count>", "dependency replacement mutations to apply", parseInteger)
   .option("--tags <count>", "tags to create", parseInteger)
   .option("--task-tags <count>", "task-tag assignments to create", parseInteger)
   .option("--instructions <count>", "instructions to create", parseInteger)
   .option("--comments <count>", "comments to create", parseInteger)
   .option("--activity <count>", "standalone activity records to append", parseInteger)
+  .option("--audit <count>", "hosted audit records to append when the store supports hosted audit", parseInteger)
   .action(async (options: {
     projectId?: string;
     tasks?: number;
+    updates?: number;
     dependencies?: number;
+    dependencyMutations?: number;
     tags?: number;
     taskTags?: number;
     instructions?: number;
     comments?: number;
     activity?: number;
+    audit?: number;
   }) => {
     const store = await openStore();
     try {
@@ -214,12 +220,15 @@ bench.command("storage")
         machine: "storage-benchmark",
         actor: program.opts<GlobalOptions>().actor ?? "storage-benchmark",
         tasks: options.tasks,
+        updates: options.updates,
         dependencies: options.dependencies,
+        dependencyMutations: options.dependencyMutations,
         tags: options.tags,
         taskTags: options.taskTags,
         instructions: options.instructions,
         comments: options.comments,
-        activity: options.activity
+        activity: options.activity,
+        audit: options.audit
       }), format());
     } finally {
       await store.close?.();
@@ -276,6 +285,9 @@ bench.command("matrix")
   .option("--hosted-postgres-url <url>", "hosted Postgres URL; defaults to the self-hosted Postgres URL")
   .option("--hosted-tenant-id <id>", "tenant id to use for hosted-mode Postgres", "bench-hosted-tenant")
   .option("--tasks <count>", "storage scenario task count", parseInteger)
+  .option("--updates <count>", "storage scenario task update count", parseInteger)
+  .option("--dependency-mutations <count>", "storage scenario dependency mutation count", parseInteger)
+  .option("--audit <count>", "storage scenario hosted audit count", parseInteger)
   .option("--read-tasks <count>", "matcher scenario task count", parseInteger)
   .option("--iterations <count>", "matcher scenario read iterations", parseInteger)
   .option("--pollers <count>", "matcher scenario concurrent polling clients", parseInteger)
@@ -290,6 +302,9 @@ bench.command("matrix")
     hostedPostgresUrl?: string;
     hostedTenantId: string;
     tasks?: number;
+    updates?: number;
+    dependencyMutations?: number;
+    audit?: number;
     readTasks?: number;
     iterations?: number;
     pollers?: number;
@@ -1261,6 +1276,9 @@ interface BenchmarkMatrixCommandOptions {
   hostedPostgresUrl?: string | undefined;
   hostedTenantId: string;
   tasks?: number | undefined;
+  updates?: number | undefined;
+  dependencyMutations?: number | undefined;
+  audit?: number | undefined;
   readTasks?: number | undefined;
   iterations?: number | undefined;
   pollers?: number | undefined;
@@ -1316,7 +1334,10 @@ async function runBenchmarkMatrix(options: BenchmarkMatrixCommandOptions): Promi
               projectId,
               machine: `${mode}-benchmark`,
               actor: "benchmark-matrix",
-              tasks: options.tasks
+              tasks: options.tasks,
+              updates: options.updates,
+              dependencyMutations: options.dependencyMutations,
+              audit: options.audit
             })
             : await runMatcherReadBenchmark(store, {
               projectId,

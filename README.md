@@ -42,7 +42,7 @@ The same settings can be supplied with `UNBLOCK_STORAGE_MODE=postgres` and
 Run the storage CRUD baseline against the configured store:
 
 ```sh
-unblock bench storage --tasks 1000 --dependencies 999 --tags 20 --task-tags 1000 --instructions 20 --comments 1000 --activity 1000 --format json
+unblock bench storage --tasks 1000 --updates 1000 --dependencies 999 --dependency-mutations 250 --tags 20 --task-tags 1000 --instructions 20 --comments 1000 --activity 1000 --audit 1000 --format json
 ```
 
 Run the reproducible benchmark matrix across local SQLite plus any supplied
@@ -55,6 +55,9 @@ unblock --format json bench matrix \
   --postgres-url postgres://user:pass@localhost:5432/unblock \
   --hosted-tenant-id tenant_benchmark \
   --tasks 1000 \
+  --updates 1000 \
+  --dependency-mutations 250 \
+  --audit 1000 \
   --read-tasks 5000 \
   --iterations 50 \
   --pollers 50

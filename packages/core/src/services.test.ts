@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createMemoryStore, createServices, ensureUnblockConfig, UnblockError, readUnblockConfig, runMatcherReadBenchmark } from "./index.js";
+import { createMemoryStore, createServices, ensureUnblockConfig, UnblockError, readUnblockConfig, runMatcherReadBenchmark, runStorageCrudBenchmark } from "./index.js";
 import type { AppStore } from "./store.js";
 
 describe("unblock core services", () => {
@@ -467,6 +467,33 @@ describe("unblock core services", () => {
       "polling.concurrent_ready"
     ]));
     expect(report.totals.reads).toBeGreaterThan(0);
+  });
+
+  it("runs the CRUD benchmark update and mutation scenarios", async () => {
+    const report = await runStorageCrudBenchmark(createMemoryStore(), {
+      projectId: "CRUD-BENCH-TEST",
+      tasks: 12,
+      updates: 6,
+      dependencies: 8,
+      dependencyMutations: 4,
+      tags: 3,
+      taskTags: 6,
+      instructions: 3,
+      comments: 5,
+      activity: 7,
+      audit: 9
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.counts.updates).toBe(6);
+    expect(report.counts.dependencyMutations).toBe(4);
+    expect(report.counts.audit).toBe(0);
+    expect(report.phases.map((phase) => phase.name)).toEqual(expect.arrayContaining([
+      "tasks.update",
+      "dependencies.mutate",
+      "activity.append"
+    ]));
+    expect(report.totals.operations).toBeGreaterThan(0);
   });
 
   it("uses the matcher language to filter activity by attached task", async () => {
