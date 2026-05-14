@@ -5,6 +5,92 @@ Postgres-native core for hosted and low-friction self-hosted deployments, while
 preserving SQLite as the local single-machine option. Prism Flows is used for
 durable connector orchestration only; it is not the primary Unblock data store.
 
+## Runtime Mode Matrix
+
+Unblock should support three runtime modes. The mode controls storage,
+enterprise features, and connector availability. The domain semantics should
+stay the same unless this document calls out a hosted-only feature.
+
+| Mode | Storage | Target user | Connector support | Enterprise support |
+| --- | --- | --- | --- | --- |
+| Local SQLite | Local SQLite file, defaulting to the current `UNBLOCK_DB` or Unblock config path behavior. | A single developer or a single machine coordinating local agent work. | Disabled. No Prism Flows, no hosted connector worker, no external credential store. | Disabled. No WorkOS requirement, no hosted tenant model, no enterprise audit export. |
+| Self-hosted Postgres | User-supplied Postgres URL managed by the team. | Small teams that want one shared Unblock instance without hosted enterprise services. | Disabled for the first hosted connector release. The schema should not block future opt-in connector workers. | Minimal. Project namespaces, local auth/provenance, and operational health checks only. |
+| Hosted Postgres | Provider-managed Postgres with hosted API, web, migration, and worker deployment. | Paid hosted and licensed enterprise deployments. | Enabled. GitHub Issues is the first connector; Prism Flows orchestrates connector sync. | Enabled. WorkOS, tenant/project RBAC, secrets, connector administration, audit export, observability, and benchmark gates. |
+
+### Local SQLite Mode
+
+Local SQLite remains the zero-friction path. It must continue to work without a
+network, without Postgres, without Prism, and without WorkOS.
+
+Required behavior:
+
+- Existing CLI defaults keep using SQLite.
+- Existing `unblock serve` local development keeps using SQLite unless a
+  Postgres mode is explicitly configured.
+- Existing migrations continue to apply to the local database.
+- All current task, dependency, tag, track, instruction, comment, view, feed,
+  activity, import, export, matcher, and context commands keep working.
+- Activity remains the local provenance trail.
+- Connector configuration is hidden or reported as unavailable.
+
+SQLite mode can keep implementation shortcuts that are acceptable for a local
+single-machine database, including service-level matcher evaluation and local
+file-backed configuration.
+
+### Self-Hosted Postgres Mode
+
+Self-hosted Postgres is the low-friction shared-team mode. The user supplies a
+Postgres database and runs Unblock against it. This mode should be boring:
+native SQL persistence, migrations, health checks, and the same core Unblock
+API as SQLite.
+
+Required behavior:
+
+- Configuration accepts a Postgres URL and selects the Postgres store.
+- Migrations are explicit and safe to run at startup or through a command.
+- Core API and CLI behavior matches SQLite semantics.
+- The API can support multiple users through configured provenance, but it does
+  not require WorkOS for the initial version.
+- Hosted-only connector routes are not enabled by default.
+- The schema includes extension points for connector tables if they do not add
+  runtime dependencies or user-visible complexity.
+
+This mode is deliberately not the enterprise product. It is a credible shared
+backend for teams that do not need hosted identity, credential management,
+operator dashboards, or managed connector orchestration.
+
+### Hosted Postgres Mode
+
+Hosted Postgres is the production SaaS path. It uses the same core Postgres
+domain schema as self-hosted mode, plus hosted-only tables and services.
+
+Required behavior:
+
+- WorkOS maps organizations and users into Unblock tenants, projects, roles,
+  and administrative actions.
+- Every request is tenant/project scoped before it reaches domain services.
+- Hosted audit records extend local activity with immutable security,
+  administration, connector, and operator events.
+- Secret and connector credentials are managed by hosted infrastructure and
+  never appear in local config files.
+- Prism Flows handles durable connector orchestration: webhooks, polling,
+  outbound sync, retries, rate limits, reconciliation, and operator review.
+- Hosted benchmark gates cover CRUD, matcher reads, dashboard polling, and
+  connector workloads before release.
+
+### Feature Boundary
+
+The implementation should avoid a fourth implicit mode. In particular:
+
+- SQLite mode must not partially initialize hosted services.
+- Self-hosted Postgres must not require Prism Flows or WorkOS.
+- Hosted mode must not use Prism as an ORM or materialized read store.
+- GitHub Issues sync is hosted-only until there is an explicit product decision
+  to support self-hosted connector workers.
+- The core service layer should remain storage-agnostic enough to run against
+  SQLite and Postgres, but hosted auth and connector orchestration should stay
+  outside that local compatibility path.
+
 ## Current SQLite Contract
 
 The existing SQLite path is the compatibility contract for local Unblock. Any
