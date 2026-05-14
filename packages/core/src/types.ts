@@ -188,6 +188,9 @@ export interface HostedSecret {
 export type ConnectorConnectionStatus = "active" | "paused" | "error" | "archived";
 export type ConnectorSyncRunStatus = "queued" | "running" | "succeeded" | "failed" | "dead_letter" | "operator_review";
 export type ConnectorSyncRunType = "outbound" | "inbound" | "reconciliation" | "cursor_recovery";
+export type ConnectorMappingStatus = "active" | "conflict" | "operator_review" | "archived";
+export type ConnectorSyncDirection = "github_to_unblock" | "unblock_to_github" | "bidirectional";
+export type ConnectorConflictPolicy = "github_wins" | "unblock_wins" | "last_writer_wins" | "operator_review";
 
 export interface ConnectorConnection {
   projectId: string;
@@ -222,6 +225,26 @@ export interface ConnectorSyncRun {
   finishedAt: string | null;
   error: Record<string, unknown> | null;
   evidence: Record<string, unknown>;
+}
+
+export interface ConnectorExternalMapping {
+  projectId: string;
+  connectionId: string;
+  provider: string;
+  externalKind: string;
+  externalId: string;
+  externalUrl: string | null;
+  externalVersion: string | null;
+  localKind: string;
+  localId: string;
+  localVersion: string | null;
+  syncDirection: ConnectorSyncDirection;
+  conflictPolicy: ConnectorConflictPolicy;
+  status: ConnectorMappingStatus;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+  metadata: Record<string, unknown>;
 }
 
 export interface ConnectorObservabilitySnapshot {

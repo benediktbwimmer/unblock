@@ -7,6 +7,7 @@ import type {
   HostedSecret,
   ConnectorConnection,
   ConnectorCursorRecord,
+  ConnectorExternalMapping,
   ConnectorSyncRun,
   Migration,
   Project,
@@ -200,6 +201,25 @@ export interface ConnectorRepository {
     connectionId?: string | undefined;
     limit?: number | undefined;
   }): Promise<ConnectorSyncRun[]>;
+  upsertMapping?(mapping: ConnectorExternalMapping): Promise<void>;
+  getMappingByExternal?(
+    projectId: string,
+    connectionId: string,
+    externalKind: string,
+    externalId: string
+  ): Promise<ConnectorExternalMapping | null>;
+  getMappingByLocal?(
+    projectId: string,
+    connectionId: string,
+    localKind: string,
+    localId: string
+  ): Promise<ConnectorExternalMapping | null>;
+  listMappings?(options: {
+    projectId?: string | undefined;
+    connectionId?: string | undefined;
+    provider?: string | undefined;
+    limit?: number | undefined;
+  }): Promise<ConnectorExternalMapping[]>;
 }
 
 export interface MatcherQueryRepository {

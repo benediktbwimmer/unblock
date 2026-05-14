@@ -13,7 +13,9 @@ import {
   connectorObservabilitySnapshot,
   githubConnectionInputSchema,
   githubConnectorAuthModel,
+  githubIssueMappingInputSchema,
   listGitHubConnections,
+  listGitHubIssueMappings,
   matcherQueryGrammar,
   MigrationService,
   nowIso,
@@ -22,6 +24,7 @@ import {
   requestConnectorReconciliation,
   rotateHostedSecret,
   UnblockError,
+  upsertGitHubIssueMapping,
   upsertGitHubConnection,
   publicUnblockConfig,
   readUnblockConfig,
@@ -332,6 +335,24 @@ export function createApp(options: ServerOptions = {}) {
     const body = githubConnectionInputSchema.parse(await c.req.json());
     await authorizeHosted(c, body.projectId);
     return c.json(await upsertGitHubConnection(c.get("store"), body), 201);
+  });
+
+  app.get("/api/connectors/github/mappings", async (c) => {
+    await requireHosted(c);
+    const projectId = c.req.query("projectId")?.trim();
+    await authorizeHosted(c, projectId ?? null);
+    return c.json(await listGitHubIssueMappings(c.get("store"), {
+      projectId,
+      connectionId: c.req.query("connectionId")?.trim(),
+      limit: parseOptionalInteger(c.req.query("limit")) ?? 100
+    }));
+  });
+
+  app.post("/api/connectors/github/mappings", async (c) => {
+    await requireHosted(c);
+    const body = githubIssueMappingInputSchema.parse(await c.req.json());
+    await authorizeHosted(c, body.projectId);
+    return c.json(await upsertGitHubIssueMapping(c.get("store"), body), 201);
   });
 
   app.get("/api/tasks", async (c) => {

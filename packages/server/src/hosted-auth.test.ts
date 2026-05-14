@@ -7,6 +7,7 @@ import {
   type AppStore,
   type ConnectorConnection,
   type ConnectorCursorRecord,
+  type ConnectorExternalMapping,
   type ConnectorRepository,
   type ConnectorSyncRun,
   type HostedSecret,
@@ -224,6 +225,41 @@ describe("hosted authorization", () => {
     await expect(listed.json()).resolves.toMatchObject([{ id: "github-main", provider: "github" }]);
   });
 
+  it("stores GitHub issue mapping records for connector reconciliation", async () => {
+    const store = await seededStore();
+    installConnectorState(store);
+    const app = createApp({ backend: "hosted", storeFactory: () => store, hostedAuth });
+
+    const created = await app.request("/api/connectors/github/mappings", {
+      method: "POST",
+      headers: { ...hostedHeaders("connector_admin"), "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: "HOSTED",
+        connectionId: "github-main",
+        repositoryOwner: "acme",
+        repositoryName: "repo",
+        issueNumber: 42,
+        issueUrl: "https://github.com/acme/repo/issues/42",
+        taskId: "GH-42",
+        externalVersion: "etag-1",
+        localVersion: "1"
+      })
+    });
+    expect(created.status).toBe(201);
+    await expect(created.json()).resolves.toMatchObject({
+      externalId: "acme/repo#42",
+      localId: "GH-42",
+      syncDirection: "bidirectional",
+      conflictPolicy: "operator_review"
+    });
+
+    const listed = await app.request("/api/connectors/github/mappings?projectId=HOSTED&connectionId=github-main", {
+      headers: hostedHeaders("connector_admin")
+    });
+    expect(listed.status).toBe(200);
+    await expect(listed.json()).resolves.toMatchObject([{ externalId: "acme/repo#42", localId: "GH-42" }]);
+  });
+
   it("applies hosted connector inbox events and records observability", async () => {
     const store = await seededStore();
     installConnectorState(store);
@@ -372,6 +408,7 @@ class FakeConnectors implements ConnectorRepository {
   connections: ConnectorConnection[] = [];
   cursors: ConnectorCursorRecord[] = [];
   runs: ConnectorSyncRun[] = [];
+  mappings: ConnectorExternalMapping[] = [];
 
   async upsertConnection(connection: ConnectorConnection) {
     const index = this.connections.findIndex((item) => item.projectId === connection.projectId && item.id === connection.id);
@@ -413,6 +450,44 @@ class FakeConnectors implements ConnectorRepository {
     return this.runs
       .filter((run) => !options.projectId || run.projectId === options.projectId)
       .filter((run) => !options.connectionId || run.connectionId === options.connectionId)
+      .slice(0, options.limit ?? 100);
+  }
+
+  async upsertMapping(mapping: ConnectorExternalMapping) {
+    const index = this.mappings.findIndex((item) =>
+      item.projectId === mapping.projectId
+        && item.connectionId === mapping.connectionId
+        && item.externalKind === mapping.externalKind
+        && item.externalId === mapping.externalId
+    );
+    if (index >= 0) this.mappings[index] = mapping;
+    else this.mappings.push(mapping);
+  }
+
+  async getMappingByExternal(projectId: string, connectionId: string, externalKind: string, externalId: string) {
+    return this.mappings.find((mapping) =>
+      mapping.projectId === projectId
+        && mapping.connectionId === connectionId
+        && mapping.externalKind === externalKind
+        && mapping.externalId === externalId
+    ) ?? null;
+  }
+
+  async getMappingByLocal(projectId: string, connectionId: string, localKind: string, localId: string) {
+    return this.mappings.find((mapping) =>
+      mapping.projectId === projectId
+        && mapping.connectionId === connectionId
+        && mapping.localKind === localKind
+        && mapping.localId === localId
+        && !mapping.archivedAt
+    ) ?? null;
+  }
+
+  async listMappings(options: { projectId?: string | undefined; connectionId?: string | undefined; provider?: string | undefined; limit?: number | undefined }) {
+    return this.mappings
+      .filter((mapping) => !options.projectId || mapping.projectId === options.projectId)
+      .filter((mapping) => !options.connectionId || mapping.connectionId === options.connectionId)
+      .filter((mapping) => !options.provider || mapping.provider === options.provider)
       .slice(0, options.limit ?? 100);
   }
 }

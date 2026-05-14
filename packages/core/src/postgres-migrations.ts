@@ -467,5 +467,40 @@ export const postgresMigrations: StoreMigration[] = [
       create index if not exists connector_sync_runs_status_idx
         on connector_sync_runs(tenant_id, project_id, status, started_at desc);
     `
+  },
+  {
+    id: "pg0005",
+    name: "hosted connector external mappings",
+    sql: `
+      create table if not exists connector_external_mappings (
+        tenant_id text not null,
+        project_id text not null,
+        connection_id text not null,
+        provider text not null,
+        external_kind text not null,
+        external_id text not null,
+        external_url text null,
+        external_version text null,
+        local_kind text not null,
+        local_id text not null,
+        local_version text null,
+        sync_direction text not null check (sync_direction in ('github_to_unblock', 'unblock_to_github', 'bidirectional')),
+        conflict_policy text not null check (conflict_policy in ('github_wins', 'unblock_wins', 'last_writer_wins', 'operator_review')),
+        status text not null check (status in ('active', 'conflict', 'operator_review', 'archived')),
+        created_at timestamptz not null,
+        updated_at timestamptz not null,
+        archived_at timestamptz null,
+        metadata_json jsonb not null default '{}'::jsonb,
+        primary key (tenant_id, project_id, connection_id, external_kind, external_id),
+        foreign key (tenant_id, project_id, connection_id)
+          references connector_connections(tenant_id, project_id, id) on delete cascade
+      );
+
+      create index if not exists connector_external_mappings_local_idx
+        on connector_external_mappings(tenant_id, project_id, connection_id, local_kind, local_id)
+        where archived_at is null;
+      create index if not exists connector_external_mappings_status_idx
+        on connector_external_mappings(tenant_id, project_id, provider, status, updated_at desc);
+    `
   }
 ];

@@ -24,7 +24,7 @@ import type {
   TaskRepository,
   TrackRepository
 } from "./store.js";
-import type { Activity, Comment, ConnectorConnection, ConnectorCursorRecord, ConnectorSyncRun, Dependency, HostedAuditEvent, HostedIdentity, HostedSecret, InboxEvent, Instruction, Migration, OutboxEvent, Project, QueueFeed, SavedView, Tag, Task, TaskTag, Track, TrackAssignment } from "./types.js";
+import type { Activity, Comment, ConnectorConnection, ConnectorCursorRecord, ConnectorExternalMapping, ConnectorSyncRun, Dependency, HostedAuditEvent, HostedIdentity, HostedSecret, InboxEvent, Instruction, Migration, OutboxEvent, Project, QueueFeed, SavedView, Tag, Task, TaskTag, Track, TrackAssignment } from "./types.js";
 import { nowIso } from "./types.js";
 
 type Queryable = pg.Pool | pg.PoolClient;
@@ -371,6 +371,74 @@ class PostgresConnectorRepository implements ConnectorRepository {
       limit $${params.length}
     `, params);
     return result.rows.map(connectorSyncRunFromRow);
+  }
+
+  async upsertMapping(mapping: ConnectorExternalMapping): Promise<void> {
+    await this.db.query(`
+      insert into connector_external_mappings (
+        tenant_id, project_id, connection_id, provider, external_kind, external_id,
+        external_url, external_version, local_kind, local_id, local_version,
+        sync_direction, conflict_policy, status, created_at, updated_at, archived_at,
+        metadata_json
+      ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb)
+      on conflict (tenant_id, project_id, connection_id, external_kind, external_id) do update set
+        provider = excluded.provider,
+        external_url = excluded.external_url,
+        external_version = excluded.external_version,
+        local_kind = excluded.local_kind,
+        local_id = excluded.local_id,
+        local_version = excluded.local_version,
+        sync_direction = excluded.sync_direction,
+        conflict_policy = excluded.conflict_policy,
+        status = excluded.status,
+        updated_at = excluded.updated_at,
+        archived_at = excluded.archived_at,
+        metadata_json = excluded.metadata_json
+    `, connectorExternalMappingParams(this.tenantId, mapping));
+  }
+
+  async getMappingByExternal(projectId: string, connectionId: string, externalKind: string, externalId: string): Promise<ConnectorExternalMapping | null> {
+    const result = await this.db.query(`
+      select * from connector_external_mappings
+      where tenant_id = $1 and project_id = $2 and connection_id = $3 and external_kind = $4 and external_id = $5
+    `, [this.tenantId, projectId, connectionId, externalKind, externalId]);
+    return result.rows[0] ? connectorExternalMappingFromRow(result.rows[0]) : null;
+  }
+
+  async getMappingByLocal(projectId: string, connectionId: string, localKind: string, localId: string): Promise<ConnectorExternalMapping | null> {
+    const result = await this.db.query(`
+      select * from connector_external_mappings
+      where tenant_id = $1 and project_id = $2 and connection_id = $3 and local_kind = $4 and local_id = $5 and archived_at is null
+      order by updated_at desc
+      limit 1
+    `, [this.tenantId, projectId, connectionId, localKind, localId]);
+    return result.rows[0] ? connectorExternalMappingFromRow(result.rows[0]) : null;
+  }
+
+  async listMappings(options: { projectId?: string | undefined; connectionId?: string | undefined; provider?: string | undefined; limit?: number | undefined }): Promise<ConnectorExternalMapping[]> {
+    const limit = Math.min(Math.max(options.limit ?? 100, 1), 1000);
+    const clauses = ["tenant_id = $1"];
+    const params: unknown[] = [this.tenantId];
+    if (options.projectId) {
+      params.push(options.projectId);
+      clauses.push(`project_id = $${params.length}`);
+    }
+    if (options.connectionId) {
+      params.push(options.connectionId);
+      clauses.push(`connection_id = $${params.length}`);
+    }
+    if (options.provider) {
+      params.push(options.provider);
+      clauses.push(`provider = $${params.length}`);
+    }
+    params.push(limit);
+    const result = await this.db.query(`
+      select * from connector_external_mappings
+      where ${clauses.join(" and ")}
+      order by updated_at desc
+      limit $${params.length}
+    `, params);
+    return result.rows.map(connectorExternalMappingFromRow);
   }
 }
 
@@ -1368,6 +1436,51 @@ function connectorSyncRunFromRow(row: any): ConnectorSyncRun {
     finishedAt: nullableIso(row.finished_at),
     error: row.error_json === null || row.error_json === undefined ? null : jsonRecord(row.error_json),
     evidence: jsonRecord(row.evidence_json)
+  };
+}
+
+function connectorExternalMappingParams(tenantId: string, mapping: ConnectorExternalMapping): unknown[] {
+  return [
+    tenantId,
+    mapping.projectId,
+    mapping.connectionId,
+    mapping.provider,
+    mapping.externalKind,
+    mapping.externalId,
+    mapping.externalUrl,
+    mapping.externalVersion,
+    mapping.localKind,
+    mapping.localId,
+    mapping.localVersion,
+    mapping.syncDirection,
+    mapping.conflictPolicy,
+    mapping.status,
+    mapping.createdAt,
+    mapping.updatedAt,
+    mapping.archivedAt,
+    JSON.stringify(mapping.metadata)
+  ];
+}
+
+function connectorExternalMappingFromRow(row: any): ConnectorExternalMapping {
+  return {
+    projectId: row.project_id,
+    connectionId: row.connection_id,
+    provider: row.provider,
+    externalKind: row.external_kind,
+    externalId: row.external_id,
+    externalUrl: row.external_url,
+    externalVersion: row.external_version,
+    localKind: row.local_kind,
+    localId: row.local_id,
+    localVersion: row.local_version,
+    syncDirection: row.sync_direction,
+    conflictPolicy: row.conflict_policy,
+    status: row.status,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+    archivedAt: nullableIso(row.archived_at),
+    metadata: jsonRecord(row.metadata_json)
   };
 }
 
