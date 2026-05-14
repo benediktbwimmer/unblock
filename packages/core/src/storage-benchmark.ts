@@ -231,6 +231,7 @@ export async function runMatcherReadBenchmark(store: AppStore, options: MatcherR
     commentCount,
     machine
   }));
+  await analyzeBenchmarkTables(store);
 
   const rootId = taskId(0);
   const dependencyTarget = taskId(Math.min(taskCount - 1, 1));
@@ -246,7 +247,13 @@ export async function runMatcherReadBenchmark(store: AppStore, options: MatcherR
     `source doc = bench.md and source section = section-0`
   ];
 
-  await services.query.match(commonQueries[0] ?? "id prefix = T", 10, { includeFinished: true, sort: "id" });
+  for (const query of commonQueries) {
+    await services.query.match(query, 100, { includeFinished: true, sort: "id" });
+  }
+  await services.query.list({ status: "ready", sort: "priority" });
+  await services.query.match("tag = bench-tag-000 and status = ready", 100, { sort: "priority" });
+  await services.exports.markdown({ where: `depends on ${dependencyTarget}`, limit: 50 });
+  await services.query.matchingInstructionIds();
   const startedAt = performance.now();
   for (const query of commonQueries) {
     await measureRead(phases, `matcher.${query}`, iterations, async () =>
@@ -470,4 +477,22 @@ function matcherBenchmarkData(options: {
 
 function tagId(index: number): string {
   return `TAG-${index.toString().padStart(3, "0")}`;
+}
+
+async function analyzeBenchmarkTables(store: AppStore): Promise<void> {
+  const maybeExec = (store as { exec?: (sql: string) => Promise<void> }).exec;
+  if (!maybeExec || store.capabilities?.dialect !== "postgres") {
+    return;
+  }
+  await maybeExec.call(store, `
+    analyze tasks;
+    analyze task_dependencies;
+    analyze tags;
+    analyze task_tags;
+    analyze tracks;
+    analyze track_assignments;
+    analyze comments;
+    analyze instructions;
+    analyze activity;
+  `);
 }

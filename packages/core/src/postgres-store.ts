@@ -547,9 +547,18 @@ class PostgresActivityRepository implements ActivityRepository {
 
   async list(projectId: string | null = null, limit = 100): Promise<Activity[]> {
     const result = projectId === null
-      ? await this.db.query("select * from activity where tenant_id = $1 order by created_at desc limit $2", [this.tenantId, limit])
-      : await this.db.query("select * from activity where tenant_id = $1 and project_id = $2 order by created_at desc limit $3", [this.tenantId, projectId, limit]);
+      ? await this.db.query("select * from activity where tenant_id = $1 order by created_at desc, id desc limit $2", [this.tenantId, limit])
+      : await this.db.query("select * from activity where tenant_id = $1 and project_id = $2 order by created_at desc, id desc limit $3", [this.tenantId, projectId, limit]);
     return result.rows.map(activityFromRow);
+  }
+
+  async version(projectId: string | null = null): Promise<string> {
+    const result = projectId === null
+      ? await this.db.query("select count(*)::int as count, max(created_at) as max_created_at from activity where tenant_id = $1", [this.tenantId])
+      : await this.db.query("select count(*)::int as count, max(created_at) as max_created_at from activity where tenant_id = $1 and project_id = $2", [this.tenantId, projectId]);
+    const row = result.rows[0] as { count: number; max_created_at: Date | string | null } | undefined;
+    const maxCreatedAt = row?.max_created_at instanceof Date ? row.max_created_at.toISOString() : row?.max_created_at ?? "";
+    return `${row?.count ?? 0}:${maxCreatedAt}`;
   }
 
   async append(activity: Activity): Promise<void> {

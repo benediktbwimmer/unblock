@@ -1566,7 +1566,15 @@ export class QueueFeedService {
   }
 }
 
+interface ProjectReadSnapshot {
+  version: string;
+  views: TaskView[];
+  activeDependencies: Dependency[];
+}
+
 export class QueryService {
+  private snapshotCache: ProjectReadSnapshot | null = null;
+
   constructor(private readonly store: AppStore, private readonly projectId: string) {}
 
   async suggest(fieldInput: string, input: { prefix?: string; limit: number }): Promise<MatcherFieldValueSuggestion[]> {
@@ -1656,6 +1664,21 @@ export class QueryService {
     const nativeTaskIds = where && nativeMatcher
       ? new Set(await nativeMatcher.matchTaskIds(this.projectId, where, (({ where: _where, ...baseFilters }) => baseFilters)(filters)))
       : null;
+    const snapshot = await this.projectSnapshot();
+    let views = nativeTaskIds ? snapshot.views.filter((task) => nativeTaskIds.has(task.id)) : snapshot.views;
+    views = this.applyFilters(views, filters);
+    if (where && !nativeTaskIds) {
+      const queryMatches = new Set(matchMatcherQuery(where, views, snapshot.activeDependencies).map((match) => match.task.id));
+      views = views.filter((task) => queryMatches.has(task.id));
+    }
+    return sortTaskViews(views, filters.sort);
+  }
+
+  private async projectSnapshot(): Promise<ProjectReadSnapshot> {
+    const version = await this.projectReadVersion();
+    if (this.snapshotCache?.version === version) {
+      return this.snapshotCache;
+    }
     const [allTasks, dependencies, comments, tags, taskTags, tracks, assignments] = await Promise.all([
       this.store.tasks.list(this.projectId),
       this.store.dependencies.list(this.projectId),
@@ -1666,7 +1689,7 @@ export class QueryService {
       this.store.tracks.listAssignments(this.projectId)
     ]);
 
-    const tasks = nativeTaskIds ? allTasks.filter((task) => nativeTaskIds.has(task.id)) : allTasks;
+    const tasks = allTasks;
     const taskById = new Map(allTasks.map((task) => [task.id, task]));
     const tagById = new Map(tags.map((tag) => [tag.id, tag]));
     const trackById = new Map(tracks.map((track) => [track.id, track]));
@@ -1809,12 +1832,16 @@ export class QueryService {
         : []
     }));
 
-    views = this.applyFilters(views, filters);
-    if (where && !nativeTaskIds) {
-      const queryMatches = new Set(matchMatcherQuery(where, views, activeDependencies).map((match) => match.task.id));
-      views = views.filter((task) => queryMatches.has(task.id));
+    this.snapshotCache = { version, views, activeDependencies };
+    return this.snapshotCache;
+  }
+
+  private async projectReadVersion(): Promise<string> {
+    if (this.store.activity.version) {
+      return await this.store.activity.version(this.projectId);
     }
-    return sortTaskViews(views, filters.sort);
+    const latest = (await this.store.activity.list(this.projectId, 1))[0];
+    return latest ? `${latest.createdAt}:${latest.id}` : "empty";
   }
 
   async match(query: string, limit: number, filters: Omit<TaskListFilters, "where"> = {}): Promise<TaskView[]> {

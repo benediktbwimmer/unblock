@@ -104,6 +104,7 @@ export interface TrackRepository {
 
 export interface ActivityRepository {
   list(projectId?: string | null, limit?: number): Promise<Activity[]>;
+  version?(projectId?: string | null): Promise<string>;
   append(activity: Activity): Promise<void>;
   appendMany?(activity: Activity[]): Promise<void>;
 }

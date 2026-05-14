@@ -343,9 +343,15 @@ class MemoryActivityRepository implements ActivityRepository {
   async list(projectId: string | null = null, limit = 100): Promise<Activity[]> {
     return [...this.state.activity]
       .filter((activity) => projectId === null || activity.projectId === projectId)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
       .slice(0, limit)
       .map(cloneActivity);
+  }
+
+  async version(projectId: string | null = null): Promise<string> {
+    const activities = this.state.activity.filter((activity) => projectId === null || activity.projectId === projectId);
+    const maxCreatedAt = activities.reduce((max, activity) => activity.createdAt > max ? activity.createdAt : max, "");
+    return `${activities.length}:${maxCreatedAt}`;
   }
 
   async append(activity: Activity): Promise<void> {

@@ -532,9 +532,17 @@ class SqliteActivityRepository implements ActivityRepository {
 
   async list(projectId: string | null = null, limit = 100): Promise<Activity[]> {
     const rows = projectId === null
-      ? this.db.prepare("select * from activity order by created_at desc limit ?").all(limit)
-      : this.db.prepare("select * from activity where project_id = ? order by created_at desc limit ?").all(projectId, limit);
+      ? this.db.prepare("select * from activity order by created_at desc, id desc limit ?").all(limit)
+      : this.db.prepare("select * from activity where project_id = ? order by created_at desc, id desc limit ?").all(projectId, limit);
     return rows.map((row) => activityFromRow(row as ActivityRow));
+  }
+
+  async version(projectId: string | null = null): Promise<string> {
+    const row = projectId === null
+      ? this.db.prepare("select count(*) as count, max(created_at) as max_created_at from activity").get()
+      : this.db.prepare("select count(*) as count, max(created_at) as max_created_at from activity where project_id = ?").get(projectId);
+    const version = row as { count: number; max_created_at: string | null };
+    return `${version.count}:${version.max_created_at ?? ""}`;
   }
 
   async append(activity: Activity): Promise<void> {
