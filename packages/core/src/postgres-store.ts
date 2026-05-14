@@ -244,6 +244,13 @@ class PostgresHostedSecretRepository implements HostedSecretRepository {
     return result.rows[0] ? hostedSecretFromRow(result.rows[0]) : null;
   }
 
+  async list(projectId?: string | null): Promise<HostedSecret[]> {
+    const result = projectId === undefined
+      ? await this.db.query("select * from hosted_secrets where tenant_id = $1 order by updated_at desc, name asc", [this.tenantId])
+      : await this.db.query("select * from hosted_secrets where tenant_id = $1 and project_id is not distinct from $2 order by updated_at desc, name asc", [this.tenantId, projectId]);
+    return result.rows.map(hostedSecretFromRow);
+  }
+
   async findByName(projectId: string | null, name: string): Promise<HostedSecret | null> {
     const result = await this.db.query(`
       select * from hosted_secrets

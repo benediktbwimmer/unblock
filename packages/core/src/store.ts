@@ -178,6 +178,7 @@ export interface HostedAuditRepository {
 export interface HostedSecretRepository {
   create(secret: HostedSecret): Promise<void>;
   get(id: string): Promise<HostedSecret | null>;
+  list(projectId?: string | null | undefined): Promise<HostedSecret[]>;
   findByName(projectId: string | null, name: string): Promise<HostedSecret | null>;
   update(secret: HostedSecret): Promise<void>;
   archive(id: string, archivedAt: string): Promise<void>;

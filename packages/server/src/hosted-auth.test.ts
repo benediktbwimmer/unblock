@@ -1,5 +1,6 @@
+import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createMemoryStore, createServices, type AppStore } from "@unblock/core";
+import { createMemoryStore, createServices, type AppStore, type HostedSecret } from "@unblock/core";
 import { createApp } from "./index.js";
 
 const hostedAuth = {
@@ -70,6 +71,59 @@ describe("hosted authorization", () => {
     expect(audit.status).toBe(200);
     const body = await audit.json() as unknown[];
     expect(body.some((event: any) => event.eventType === "hosted.request.allowed")).toBe(true);
+  });
+
+  it("stores hosted connector secrets without returning plaintext", async () => {
+    const previousKey = process.env.UNBLOCK_HOSTED_SECRET_KEY;
+    process.env.UNBLOCK_HOSTED_SECRET_KEY = randomBytes(32).toString("hex");
+    const store = await seededStore();
+    const secrets: HostedSecret[] = [];
+    store.hostedSecrets = {
+      async create(secret) {
+        secrets.push(secret);
+      },
+      async get(id) {
+        return secrets.find((secret) => secret.id === id) ?? null;
+      },
+      async list() {
+        return secrets;
+      },
+      async findByName(projectId, name) {
+        return secrets.find((secret) => secret.projectId === projectId && secret.name === name && !secret.archivedAt) ?? null;
+      },
+      async update(secret) {
+        const index = secrets.findIndex((item) => item.id === secret.id);
+        secrets[index] = secret;
+      },
+      async archive(id, archivedAt) {
+        const secret = secrets.find((item) => item.id === id);
+        if (secret) secret.archivedAt = archivedAt;
+      }
+    };
+    const app = createApp({ backend: "hosted", storeFactory: () => store, hostedAuth });
+
+    try {
+      const created = await app.request("/api/secrets?projectId=HOSTED", {
+        method: "POST",
+        headers: { ...hostedHeaders("security_admin"), "content-type": "application/json" },
+        body: JSON.stringify({ name: "github-token", purpose: "github.connector", plaintext: "ghs_secret" })
+      });
+      expect(created.status).toBe(201);
+      const body = await created.json() as any;
+      expect(body.redacted).toBe(true);
+      expect(JSON.stringify(body)).not.toContain("ghs_secret");
+      expect(secrets[0]?.ciphertext).not.toContain("ghs_secret");
+
+      const listed = await app.request("/api/secrets?projectId=HOSTED", { headers: hostedHeaders("security_admin") });
+      expect(listed.status).toBe(200);
+      expect(JSON.stringify(await listed.json())).not.toContain("ghs_secret");
+    } finally {
+      if (previousKey === undefined) {
+        delete process.env.UNBLOCK_HOSTED_SECRET_KEY;
+      } else {
+        process.env.UNBLOCK_HOSTED_SECRET_KEY = previousKey;
+      }
+    }
   });
 });
 

@@ -5,10 +5,14 @@ import {
   createServices,
   createPostgresStore,
   createSqliteStore,
+  createHostedSecret,
   defaultUnblockConfigPath,
   formatExplain,
   matcherQueryGrammar,
   MigrationService,
+  nowIso,
+  parseHostedSecretKey,
+  rotateHostedSecret,
   UnblockError,
   publicUnblockConfig,
   readUnblockConfig,
@@ -21,7 +25,8 @@ import {
   type Priority,
   type TaskListFilters,
   type TaskSize,
-  type TaskSort
+  type TaskSort,
+  type HostedSecret
 } from "@unblock/core";
 import {
   enforceHostedRateLimit,
@@ -137,6 +142,63 @@ export function createApp(options: ServerOptions = {}) {
       projectId: c.req.query("projectId") === undefined ? undefined : projectId,
       limit: parseOptionalInteger(c.req.query("limit")) ?? 100
     }) ?? []);
+  });
+
+  app.get("/api/secrets", async (c) => {
+    await requireHosted(c);
+    const projectId = c.req.query("projectId")?.trim() || null;
+    await authorizeHosted(c, projectId);
+    const secrets = await c.get("store").hostedSecrets?.list(c.req.query("projectId") === undefined ? undefined : projectId) ?? [];
+    return c.json(secrets.map(redactSecret));
+  });
+
+  app.post("/api/secrets", async (c) => {
+    const hosted = await requireHosted(c);
+    const projectId = c.req.query("projectId")?.trim() || null;
+    await authorizeHosted(c, projectId);
+    const body = await c.req.json<{ name?: string; purpose?: string; plaintext?: string }>();
+    const repo = c.get("store").hostedSecrets;
+    if (!repo) throw new UnblockError("validation", "Hosted secret repository is not available.");
+    const existing = await repo.findByName(projectId, body.name ?? "");
+    if (existing) throw new UnblockError("conflict", `Hosted secret already exists: ${body.name}`);
+    const secret = createHostedSecret({
+      tenantId: hosted.identity.tenantId,
+      projectId,
+      name: body.name ?? "",
+      purpose: body.purpose ?? "",
+      plaintext: body.plaintext ?? "",
+      key: parseHostedSecretKey(process.env.UNBLOCK_HOSTED_SECRET_KEY),
+      keyId: process.env.UNBLOCK_HOSTED_SECRET_KEY_ID ?? "default"
+    });
+    await repo.create(secret);
+    return c.json(redactSecret(secret), 201);
+  });
+
+  app.post("/api/secrets/:id/rotate", async (c) => {
+    await requireHosted(c);
+    await authorizeHosted(c, null);
+    const repo = c.get("store").hostedSecrets;
+    if (!repo) throw new UnblockError("validation", "Hosted secret repository is not available.");
+    const current = await repo.get(c.req.param("id"));
+    if (!current) throw new UnblockError("not_found", `secret not found: ${c.req.param("id")}`);
+    const body = await c.req.json<{ plaintext?: string }>();
+    const rotated = rotateHostedSecret(
+      current,
+      body.plaintext ?? "",
+      parseHostedSecretKey(process.env.UNBLOCK_HOSTED_SECRET_KEY),
+      process.env.UNBLOCK_HOSTED_SECRET_KEY_ID ?? current.keyId
+    );
+    await repo.update(rotated);
+    return c.json(redactSecret(rotated));
+  });
+
+  app.delete("/api/secrets/:id", async (c) => {
+    await requireHosted(c);
+    await authorizeHosted(c, null);
+    const repo = c.get("store").hostedSecrets;
+    if (!repo) throw new UnblockError("validation", "Hosted secret repository is not available.");
+    await repo.archive(c.req.param("id"), nowIso());
+    return c.json({ ok: true });
   });
 
   app.get("/api/tasks", async (c) => {
@@ -374,6 +436,23 @@ function requireProjectId(c: Context): string {
     throw new UnblockError("validation", "projectId is required for this endpoint.");
   }
   return projectId;
+}
+
+function redactSecret(secret: HostedSecret) {
+  return {
+    tenantId: secret.tenantId,
+    projectId: secret.projectId,
+    id: secret.id,
+    name: secret.name,
+    purpose: secret.purpose,
+    keyId: secret.keyId,
+    algorithm: secret.algorithm,
+    createdAt: secret.createdAt,
+    updatedAt: secret.updatedAt,
+    rotatedAt: secret.rotatedAt,
+    archivedAt: secret.archivedAt,
+    redacted: true
+  };
 }
 
 declare module "hono" {
