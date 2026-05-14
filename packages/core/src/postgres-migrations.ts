@@ -87,8 +87,7 @@ export const postgresMigrations: StoreMigration[] = [
         archived_at timestamptz null,
         version integer not null default 1 check (version >= 1),
         primary key (tenant_id, project_id, id),
-        foreign key (tenant_id, project_id) references projects(tenant_id, id) on delete restrict,
-        foreign key (tenant_id, project_id, parent_task_id) references tasks(tenant_id, project_id, id) on delete set null
+        foreign key (tenant_id, project_id) references projects(tenant_id, id) on delete restrict
       );
 
       create table if not exists task_dependencies (
@@ -118,8 +117,8 @@ export const postgresMigrations: StoreMigration[] = [
         foreign key (tenant_id, project_id) references projects(tenant_id, id) on delete restrict
       );
 
-      create unique index if not exists tags_tenant_project_lower_name_idx
-        on tags (tenant_id, project_id, lower(name));
+      create unique index if not exists tags_tenant_project_name_idx
+        on tags (tenant_id, project_id, name);
 
       create table if not exists task_tags (
         tenant_id text not null,
@@ -175,8 +174,8 @@ export const postgresMigrations: StoreMigration[] = [
         foreign key (tenant_id, project_id) references projects(tenant_id, id) on delete restrict
       );
 
-      create unique index if not exists instructions_tenant_project_lower_name_idx
-        on instructions (tenant_id, project_id, lower(name));
+      create unique index if not exists instructions_tenant_project_name_idx
+        on instructions (tenant_id, project_id, name);
 
       create table if not exists saved_views (
         tenant_id text not null,
@@ -191,8 +190,8 @@ export const postgresMigrations: StoreMigration[] = [
         foreign key (tenant_id, project_id) references projects(tenant_id, id) on delete restrict
       );
 
-      create unique index if not exists saved_views_tenant_project_lower_name_idx
-        on saved_views (tenant_id, project_id, lower(name));
+      create unique index if not exists saved_views_tenant_project_name_idx
+        on saved_views (tenant_id, project_id, name);
 
       create table if not exists queue_feeds (
         tenant_id text not null,
@@ -207,8 +206,8 @@ export const postgresMigrations: StoreMigration[] = [
         foreign key (tenant_id, project_id) references projects(tenant_id, id) on delete restrict
       );
 
-      create unique index if not exists queue_feeds_tenant_project_lower_name_idx
-        on queue_feeds (tenant_id, project_id, lower(name));
+      create unique index if not exists queue_feeds_tenant_project_name_idx
+        on queue_feeds (tenant_id, project_id, name);
 
       create table if not exists comments (
         tenant_id text not null,

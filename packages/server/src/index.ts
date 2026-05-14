@@ -3,6 +3,7 @@ import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import {
   createServices,
+  createPostgresStore,
   createSqliteStore,
   defaultUnblockConfigPath,
   formatExplain,
@@ -329,10 +330,11 @@ async function openStore(options: ServerOptions): Promise<AppStore> {
   if (storage.mode === "sqlite") {
     return createSqliteStore(defined({ databasePath: storage.sqlitePath, autoMigrate: true }));
   }
-  throw new UnblockError(
-    "validation",
-    `Storage mode ${storage.mode} is configured, but the ${storage.mode} store is not implemented yet.`
-  );
+  return await createPostgresStore({
+    connectionString: storage.postgresUrl,
+    tenantId: process.env.UNBLOCK_TENANT_ID,
+    autoMigrate: true
+  });
 }
 
 async function openLegacyPrismStore(): Promise<AppStore> {

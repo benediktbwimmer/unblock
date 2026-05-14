@@ -4,6 +4,7 @@ export * from "./store.js";
 export * from "./graph.js";
 export * from "./migrations.js";
 export * from "./postgres-migrations.js";
+export * from "./postgres-store.js";
 export * from "./services.js";
 export * from "./memory-store.js";
 export * from "./sqlite-store.js";
