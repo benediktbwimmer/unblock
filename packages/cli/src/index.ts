@@ -23,6 +23,7 @@ import {
   readUnblockConfig,
   readUnblockConfigSync,
   resolveUnblockStorageConfig,
+  runMatcherReadBenchmark,
   runStorageCrudBenchmark,
   slugify,
   updateUnblockConfig,
@@ -217,6 +218,45 @@ bench.command("storage")
         instructions: options.instructions,
         comments: options.comments,
         activity: options.activity
+      }), format());
+    } finally {
+      await store.close?.();
+    }
+  });
+
+bench.command("matcher")
+  .description("Run matcher-heavy read benchmarks against the configured store")
+  .option("--project-id <id>", "project id to create for this benchmark")
+  .option("--tasks <count>", "tasks to seed", parseInteger)
+  .option("--tags <count>", "tags to seed", parseInteger)
+  .option("--tracks <count>", "actor queues to seed", parseInteger)
+  .option("--instructions <count>", "instructions to seed", parseInteger)
+  .option("--comments <count>", "comments to seed", parseInteger)
+  .option("--iterations <count>", "read iterations per phase", parseInteger)
+  .option("--pollers <count>", "concurrent dashboard pollers", parseInteger)
+  .action(async (options: {
+    projectId?: string;
+    tasks?: number;
+    tags?: number;
+    tracks?: number;
+    instructions?: number;
+    comments?: number;
+    iterations?: number;
+    pollers?: number;
+  }) => {
+    const store = await openStore();
+    try {
+      print(await runMatcherReadBenchmark(store, {
+        projectId: options.projectId,
+        machine: "matcher-benchmark",
+        actor: program.opts<GlobalOptions>().actor ?? "matcher-benchmark",
+        tasks: options.tasks,
+        tags: options.tags,
+        tracks: options.tracks,
+        instructions: options.instructions,
+        comments: options.comments,
+        iterations: options.iterations,
+        pollers: options.pollers
       }), format());
     } finally {
       await store.close?.();

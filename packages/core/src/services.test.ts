@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createMemoryStore, createServices, ensureUnblockConfig, UnblockError, readUnblockConfig } from "./index.js";
+import { createMemoryStore, createServices, ensureUnblockConfig, UnblockError, readUnblockConfig, runMatcherReadBenchmark } from "./index.js";
 import type { AppStore } from "./store.js";
 
 describe("unblock core services", () => {
@@ -444,6 +444,29 @@ describe("unblock core services", () => {
     expect(store.capabilities?.matcherQuery).toBe("service");
     expect((await services.query.match("tag = backend", 10)).map((task) => task.id)).toEqual(["API"]);
     expect(await services.query.matchIds("tag = backend", 10)).toEqual(["API"]);
+  });
+
+  it("runs the matcher-heavy read benchmark matrix", async () => {
+    const report = await runMatcherReadBenchmark(createMemoryStore(), {
+      projectId: "MATCHER-BENCH-TEST",
+      tasks: 120,
+      tags: 6,
+      tracks: 3,
+      instructions: 6,
+      comments: 40,
+      iterations: 1,
+      pollers: 2
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.counts.tasks).toBe(120);
+    expect(report.phases.map((phase) => phase.name)).toEqual(expect.arrayContaining([
+      "dashboard.ready",
+      "context.dependency_slice",
+      "instructions.matching_ids",
+      "polling.concurrent_ready"
+    ]));
+    expect(report.totals.reads).toBeGreaterThan(0);
   });
 
   it("uses the matcher language to filter activity by attached task", async () => {

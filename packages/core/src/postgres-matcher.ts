@@ -45,14 +45,14 @@ function lowerNode(node: QueryNode, builder: SqlBuilder, context: LowerContext):
   if (node.type === "not") {
     return `not (${lowerNode(node.node, builder, context)})`;
   }
-  if (node.type === "field") return lowerField(node, builder);
+  if (node.type === "field") return lowerField(node, builder, context);
   if (node.type === "time") return lowerTime(node, builder);
   if (node.type === "comment") return lowerComment(node, builder);
   if (node.type === "graph") return lowerGraph(node, builder, context);
   return lowerHierarchy(node, builder, context);
 }
 
-function lowerField(predicate: FieldPredicate, builder: SqlBuilder): string {
+function lowerField(predicate: FieldPredicate, builder: SqlBuilder, context: LowerContext): string {
   if (predicate.field === "priority") {
     return compareNumeric("t.priority", predicate.op, numericValue(predicate.values[0] ?? ""));
   }
@@ -61,28 +61,28 @@ function lowerField(predicate: FieldPredicate, builder: SqlBuilder): string {
     return compareNumeric(countSql, predicate.op, numericValue(predicate.values[0] ?? ""));
   }
   if (predicate.op === "in" || predicate.op === "not in") {
-    const parts = predicate.values.map((value) => lowerField({ ...predicate, op: "=", values: [value] }, builder));
+    const parts = predicate.values.map((value) => lowerField({ ...predicate, op: "=", values: [value] }, builder, context));
     const joined = parts.length > 0 ? parts.map((part) => `(${part})`).join(" or ") : "false";
     return predicate.op === "in" ? joined : `not (${joined})`;
   }
   const value = predicate.values[0] ?? "";
-  const equality = lowerFieldEquality(predicate.field, value, builder);
+  const equality = lowerFieldEquality(predicate.field, value, builder, context);
   if (predicate.op === "=") return equality;
   if (predicate.op === "!=") return `not (${equality})`;
   validation(`Matcher field ${predicate.field} only supports equality operators in SQL lowering.`);
 }
 
-function lowerFieldEquality(field: FieldPredicate["field"], value: string, builder: SqlBuilder): string {
+function lowerFieldEquality(field: FieldPredicate["field"], value: string, builder: SqlBuilder, context: LowerContext): string {
   if (field === "id") return builder.param(value.toUpperCase(), "t.id = $");
   if (field === "id prefix") return builder.param(`${value.toUpperCase()}%`, "t.id like $");
   if (field === "tag") {
     const tagId = builder.add(value.toUpperCase());
     const tagName = builder.add(value.toLowerCase());
     return `
-      exists (
-        select 1 from task_tags tt
+      t.id in (
+        select tt.task_id from task_tags tt
         join tags tg on tg.tenant_id = tt.tenant_id and tg.project_id = tt.project_id and tg.id = tt.tag_id
-        where tt.tenant_id = t.tenant_id and tt.project_id = t.project_id and tt.task_id = t.id
+        where tt.tenant_id = $1 and tt.project_id = ${context.projectPlaceholder}
           and tg.archived_at is null
           and (tg.id = $${tagId} or lower(tg.name) = $${tagName})
       )
@@ -93,10 +93,10 @@ function lowerFieldEquality(field: FieldPredicate["field"], value: string, build
     const actor = builder.add(actorRef.actor);
     const machineClause = actorRef.machine ? `and lower(tr.machine) = $${builder.add(actorRef.machine)}` : "";
     return `
-      exists (
-        select 1 from track_assignments ta
+      t.id in (
+        select ta.task_id from track_assignments ta
         join tracks tr on tr.tenant_id = ta.tenant_id and tr.project_id = ta.project_id and tr.id = ta.track_id
-        where ta.tenant_id = t.tenant_id and ta.project_id = t.project_id and ta.task_id = t.id
+        where ta.tenant_id = $1 and ta.project_id = ${context.projectPlaceholder}
           and tr.archived_at is null
           and lower(tr.actor) = $${actor}
           ${machineClause}
@@ -106,10 +106,10 @@ function lowerFieldEquality(field: FieldPredicate["field"], value: string, build
   if (field === "machine" || field === "actor") {
     const expected = builder.add(value.toLowerCase());
     return `
-      exists (
-        select 1 from track_assignments ta
+      t.id in (
+        select ta.task_id from track_assignments ta
         join tracks tr on tr.tenant_id = ta.tenant_id and tr.project_id = ta.project_id and tr.id = ta.track_id
-        where ta.tenant_id = t.tenant_id and ta.project_id = t.project_id and ta.task_id = t.id
+        where ta.tenant_id = $1 and ta.project_id = ${context.projectPlaceholder}
           and tr.archived_at is null
           and lower(tr.${field}) = $${expected}
       )
