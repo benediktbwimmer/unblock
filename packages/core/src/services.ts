@@ -845,9 +845,18 @@ export class TagService {
     if (normalized.length === 0) return;
 
     await this.store.transaction(async (repos) => {
-      const tasks = await repos.tasks.list(this.projectId);
-      const taskIds = new Set(tasks.map((task) => task.id));
-      const tags = await repos.tags.list(this.projectId);
+      const uniqueTaskIds = [...new Set(normalized.map((input) => input.taskId))];
+      const taskIds = uniqueTaskIds.length <= 100
+        ? new Set((await Promise.all(uniqueTaskIds.map(async (taskId) =>
+          await repos.tasks.get(this.projectId, taskId) ?? notFound("task", taskId)
+        ))).map((task) => task.id))
+        : new Set((await repos.tasks.list(this.projectId)).map((task) => task.id));
+      const uniqueTagRefs = [...new Set(normalized.flatMap((input) => input.tagIdsOrNames))];
+      const tags = uniqueTagRefs.length <= 100
+        ? await Promise.all(uniqueTagRefs.map(async (tagIdOrName) =>
+          await repos.tags.get(this.projectId, normalizeId(tagIdOrName)) ?? await repos.tags.findByName(this.projectId, tagIdOrName) ?? notFound("tag", tagIdOrName)
+        ))
+        : await repos.tags.list(this.projectId);
       const tagsById = new Map(tags.map((tag) => [tag.id, tag]));
       const tagsByName = new Map(tags.map((tag) => [tag.name, tag]));
       const assigned = new Set<string>();
@@ -889,6 +898,10 @@ export class TagService {
     const taskId = normalizeId(taskIdInput);
     await this.store.transaction(async (repos) => {
       const tag = await repos.tags.get(this.projectId, normalizeId(tagIdOrName)) ?? await repos.tags.findByName(this.projectId, tagIdOrName) ?? notFound("tag", tagIdOrName);
+      const hasTag = repos.tags.hasTaskTag
+        ? await repos.tags.hasTaskTag(this.projectId, taskId, tag.id)
+        : (await repos.tags.listTaskTags(this.projectId)).some((taskTag) => taskTag.taskId === taskId && taskTag.tagId === tag.id);
+      if (!hasTag) return;
       await repos.tags.removeTaskTag(this.projectId, taskId, tag.id);
       await repos.activity.append(this.activity.make(this.projectId, "tag.removed", "task", taskId, `Removed tag ${tag.name} from ${taskId}`, { tagId: tag.id }));
     });
@@ -1752,6 +1765,12 @@ export class QueryService {
 
   private async matchTaskIdsByInstructionQuery(instructions: Instruction[]): Promise<Map<string, string[]>> {
     if (!this.store.matcher) return new Map();
+    if (this.store.matcher.matchTaskIdsByInstructionQuery) {
+      return await this.store.matcher.matchTaskIdsByInstructionQuery(this.projectId, instructions, {
+        includeArchived: true,
+        includeFinished: true,
+      });
+    }
     const queries = [...new Set(instructions.map((instruction) => instruction.query))];
     const entries = await Promise.all(queries.map(async (query) => [
       query,

@@ -55,6 +55,7 @@ export interface TagRepository {
   create(tag: Tag): Promise<void>;
   update(tag: Tag): Promise<void>;
   listTaskTags(projectId?: string): Promise<TaskTag[]>;
+  hasTaskTag?(projectId: string, taskId: string, tagId: string): Promise<boolean>;
   addTaskTag(taskTag: TaskTag): Promise<void>;
   addTaskTags?(assignments: Array<{ taskTag: TaskTag; tag?: Tag | null }>): Promise<void>;
   removeTaskTag(projectId: string, taskId: string, tagId: string): Promise<void>;
@@ -106,6 +107,11 @@ export interface MigrationRepository {
 
 export interface MatcherQueryRepository {
   matchTaskIds(projectId: string, query: string, filters?: Omit<TaskListFilters, "where">): Promise<string[]>;
+  matchTaskIdsByInstructionQuery?(
+    projectId: string,
+    instructions: Instruction[],
+    filters?: Omit<TaskListFilters, "where">
+  ): Promise<Map<string, string[]>>;
 }
 
 export interface RepositorySet {

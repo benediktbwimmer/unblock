@@ -24,6 +24,8 @@ class RecordingClient implements PrismRuntimeClient {
   tags = new Map<string, PrismTagAssignment[]>();
   fragments: RuntimeQueryFragmentRecord[] = [];
   fragmentUses: RuntimeQueryFragmentUseRecord[] = [];
+  materializedReads: Array<{ surfaceId: string; replacementScope?: string }> = [];
+  queries: Array<{ surfaceId: string }> = [];
 
   async submitSemanticCommit(batch: {
     projectId: string;
@@ -36,11 +38,15 @@ class RecordingClient implements PrismRuntimeClient {
     this.batches.push(batch);
   }
 
-  async readMaterializedSurface<T extends Record<string, unknown>>(input: { surfaceId: string }): Promise<T[]> {
-    return (this.surfaces.get(input.surfaceId) ?? []) as T[];
+  async readMaterializedSurface<T extends Record<string, unknown>>(input: { surfaceId: string; replacementScope?: string }): Promise<T[]> {
+    this.materializedReads.push(input);
+    const rows = this.surfaces.get(input.surfaceId) ?? [];
+    if (!input.replacementScope) return rows as T[];
+    return rows.filter((row) => row.project_id === input.replacementScope || row.id === input.replacementScope) as T[];
   }
 
   async query<T extends Record<string, unknown>>(input: { surfaceId: string }): Promise<T[]> {
+    this.queries.push(input);
     return (this.surfaces.get(input.surfaceId) ?? []) as T[];
   }
 
@@ -249,6 +255,51 @@ describe("PrismStore", () => {
         }),
       },
     }));
+  });
+
+  it("uses scoped materialized fragment reads for instruction matching", async () => {
+    const query = "tag = backend";
+    const fragment = lowerMatcherQueryToPrismFragment(query);
+    const client = new RecordingClient();
+    client.surfaces.set("instructionSelectorCatalog", [{
+      project_id: "P",
+      instruction_id: "I",
+      selector_text: query,
+      selector_hash: fragment.selectorHash,
+      selector_fragment_id: fragment.fragmentId,
+      selector_fragment_hash: "fragment:hash",
+      body: "Backend rules",
+    }]);
+    client.surfaces.set(fragment.fragmentId, [
+      { project_id: "P", task_id: "WORK" },
+      { project_id: "P", task_id: "WORK" },
+      { project_id: "OTHER", task_id: "NOPE" },
+    ]);
+    const store = createPrismStore({
+      client,
+      fragmentCompiler: new RecordingCompiler(),
+      readMode: "materialized",
+    });
+    const now = new Date("2026-05-13T00:00:00.000Z").toISOString();
+
+    const matches = await store.matcher.matchTaskIdsByInstructionQuery?.("P", [{
+      projectId: "P",
+      id: "I",
+      name: "Backend work",
+      query,
+      body: "Backend rules",
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+    }]);
+
+    expect(matches?.get(query)).toEqual(["WORK"]);
+    expect(client.queries).toHaveLength(0);
+    expect(client.materializedReads).toEqual(expect.arrayContaining([
+      expect.objectContaining({ surfaceId: "instructionSelectorCatalog", replacementScope: "P" }),
+      expect.objectContaining({ surfaceId: fragment.fragmentId, replacementScope: "P" }),
+    ]));
   });
 });
 
