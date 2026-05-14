@@ -10,6 +10,7 @@ import {
   type ConnectorRepository,
   type ConnectorSyncRun,
   type HostedSecret,
+  type HostedSecretRepository,
   type InboxEvent,
   type InboxEventRepository,
   type OutboxEvent,
@@ -173,6 +174,56 @@ describe("hosted authorization", () => {
     });
   });
 
+  it("registers GitHub App installation connections with secret references", async () => {
+    const store = await seededStore();
+    installConnectorState(store);
+    installSecretState(store, [
+      fakeSecret("github-private-key", "github.private_key"),
+      fakeSecret("github-webhook-secret", "github.webhook_secret")
+    ]);
+    const app = createApp({ backend: "hosted", storeFactory: () => store, hostedAuth });
+
+    const model = await app.request("/api/connectors/github/auth-model", {
+      headers: hostedHeaders("connector_admin")
+    });
+    expect(model.status).toBe(200);
+    await expect(model.json()).resolves.toMatchObject({
+      mode: "github_app_installation",
+      repositoryPermissions: { metadata: "read", issues: "write" }
+    });
+
+    const created = await app.request("/api/connectors/github/connections", {
+      method: "POST",
+      headers: { ...hostedHeaders("connector_admin"), "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: "HOSTED",
+        connectionId: "github-main",
+        appId: "123",
+        installationId: "456",
+        repositoryOwner: "acme",
+        repositoryName: "repo",
+        privateKeySecretId: "github-private-key",
+        webhookSecretId: "github-webhook-secret"
+      })
+    });
+    expect(created.status).toBe(201);
+    await expect(created.json()).resolves.toMatchObject({
+      provider: "github",
+      metadata: {
+        authModel: "github_app_installation",
+        repositoryOwner: "acme",
+        repositoryName: "repo",
+        conflictPolicy: "operator_review"
+      }
+    });
+
+    const listed = await app.request("/api/connectors/github/connections?projectId=HOSTED", {
+      headers: hostedHeaders("connector_admin")
+    });
+    expect(listed.status).toBe(200);
+    await expect(listed.json()).resolves.toMatchObject([{ id: "github-main", provider: "github" }]);
+  });
+
   it("applies hosted connector inbox events and records observability", async () => {
     const store = await seededStore();
     installConnectorState(store);
@@ -280,6 +331,27 @@ function installConnectorState(store: AppStore): void {
   (store as any).inbox = new FakeInbox();
 }
 
+function installSecretState(store: AppStore, secrets: HostedSecret[]): void {
+  (store as any).hostedSecrets = new FakeSecrets(secrets);
+}
+
+function fakeSecret(id: string, purpose: string): HostedSecret {
+  return {
+    tenantId: "ORG_HOSTED",
+    projectId: "HOSTED",
+    id,
+    name: id,
+    purpose,
+    ciphertext: "redacted",
+    keyId: "test",
+    algorithm: "aes-256-gcm",
+    createdAt: "2026-05-14T00:00:00.000Z",
+    updatedAt: "2026-05-14T00:00:00.000Z",
+    rotatedAt: null,
+    archivedAt: null
+  };
+}
+
 function hostedHeaders(role: string): Record<string, string> {
   return {
     "x-unblock-principal-id": "user_123",
@@ -342,6 +414,36 @@ class FakeConnectors implements ConnectorRepository {
       .filter((run) => !options.projectId || run.projectId === options.projectId)
       .filter((run) => !options.connectionId || run.connectionId === options.connectionId)
       .slice(0, options.limit ?? 100);
+  }
+}
+
+class FakeSecrets implements HostedSecretRepository {
+  constructor(private readonly secrets: HostedSecret[]) {}
+
+  async create(secret: HostedSecret) {
+    this.secrets.push(secret);
+  }
+
+  async get(id: string) {
+    return this.secrets.find((secret) => secret.id === id) ?? null;
+  }
+
+  async list(projectId?: string | null | undefined) {
+    return this.secrets.filter((secret) => projectId === undefined || secret.projectId === projectId);
+  }
+
+  async findByName(projectId: string | null, name: string) {
+    return this.secrets.find((secret) => secret.projectId === projectId && secret.name === name && !secret.archivedAt) ?? null;
+  }
+
+  async update(secret: HostedSecret) {
+    const index = this.secrets.findIndex((item) => item.id === secret.id);
+    this.secrets[index] = secret;
+  }
+
+  async archive(id: string, archivedAt: string) {
+    const secret = this.secrets.find((item) => item.id === id);
+    if (secret) secret.archivedAt = archivedAt;
   }
 }
 

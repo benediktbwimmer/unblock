@@ -11,6 +11,9 @@ import {
   applyConnectorInboxEvent,
   connectorEventSchema,
   connectorObservabilitySnapshot,
+  githubConnectionInputSchema,
+  githubConnectorAuthModel,
+  listGitHubConnections,
   matcherQueryGrammar,
   MigrationService,
   nowIso,
@@ -19,6 +22,7 @@ import {
   requestConnectorReconciliation,
   rotateHostedSecret,
   UnblockError,
+  upsertGitHubConnection,
   publicUnblockConfig,
   readUnblockConfig,
   resolveUnblockStorageConfig,
@@ -308,6 +312,26 @@ export function createApp(options: ServerOptions = {}) {
       ? await observeConnectorInboxEvent(c.get("store"), event, { evidence: result.evidence })
       : null;
     return c.json({ ...result, observation });
+  });
+
+  app.get("/api/connectors/github/auth-model", async (c) => {
+    await requireHosted(c);
+    await authorizeHosted(c, null);
+    return c.json(githubConnectorAuthModel);
+  });
+
+  app.get("/api/connectors/github/connections", async (c) => {
+    await requireHosted(c);
+    const projectId = c.req.query("projectId")?.trim();
+    await authorizeHosted(c, projectId ?? null);
+    return c.json(await listGitHubConnections(c.get("store"), projectId));
+  });
+
+  app.post("/api/connectors/github/connections", async (c) => {
+    await requireHosted(c);
+    const body = githubConnectionInputSchema.parse(await c.req.json());
+    await authorizeHosted(c, body.projectId);
+    return c.json(await upsertGitHubConnection(c.get("store"), body), 201);
   });
 
   app.get("/api/tasks", async (c) => {

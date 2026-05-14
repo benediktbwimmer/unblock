@@ -10,6 +10,7 @@ export * from "./hosted-identity.js";
 export * from "./connector-events.js";
 export * from "./connector-flows.js";
 export * from "./connector-reconciliation.js";
+export * from "./github-connector.js";
 export * from "./services.js";
 export * from "./memory-store.js";
 export * from "./sqlite-store.js";
