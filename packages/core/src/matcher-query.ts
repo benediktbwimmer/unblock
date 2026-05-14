@@ -1,4 +1,5 @@
 import { validation } from "./errors.js";
+import { normalizeMatcherQuery, planMatcherQuery, type MatcherPlan, type NormalizedMatcherQuery } from "./matcher-plan.js";
 import type { Dependency, TaskView } from "./types.js";
 
 type TokenKind = "word" | "number" | "string" | "op" | "lparen" | "rparen" | "comma" | "eof";
@@ -278,6 +279,14 @@ export function parseMatcherQuery(query: string): QueryNode {
   const ast = parser.parseExpression();
   parser.expect("eof");
   return ast;
+}
+
+export function parseNormalizedMatcherQuery(query: string): NormalizedMatcherQuery {
+  return normalizeMatcherQuery(query, parseMatcherQuery(query));
+}
+
+export function parseMatcherPlan(query: string, filters: Parameters<typeof planMatcherQuery>[2] = {}): MatcherPlan {
+  return planMatcherQuery(query, parseMatcherQuery(query), filters);
 }
 
 class Parser {
