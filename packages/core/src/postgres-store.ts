@@ -7,6 +7,9 @@ import type {
   AppStore,
   CommentRepository,
   DependencyRepository,
+  HostedAuditRepository,
+  HostedIdentityRepository,
+  HostedSecretRepository,
   InboxEventRepository,
   MigrationRepository,
   MatcherQueryRepository,
@@ -20,7 +23,7 @@ import type {
   TaskRepository,
   TrackRepository
 } from "./store.js";
-import type { Activity, Comment, Dependency, InboxEvent, Instruction, Migration, OutboxEvent, Project, QueueFeed, SavedView, Tag, Task, TaskTag, Track, TrackAssignment } from "./types.js";
+import type { Activity, Comment, Dependency, HostedAuditEvent, HostedIdentity, HostedSecret, InboxEvent, Instruction, Migration, OutboxEvent, Project, QueueFeed, SavedView, Tag, Task, TaskTag, Track, TrackAssignment } from "./types.js";
 import { nowIso } from "./types.js";
 
 type Queryable = pg.Pool | pg.PoolClient;
@@ -57,6 +60,9 @@ export class PostgresStore implements AppStore {
   readonly outbox: OutboxEventRepository;
   readonly inbox: InboxEventRepository;
   readonly matcher: MatcherQueryRepository;
+  readonly hostedIdentity: HostedIdentityRepository;
+  readonly hostedAudit: HostedAuditRepository;
+  readonly hostedSecrets: HostedSecretRepository;
 
   constructor(
     private readonly pool: pg.Pool,
@@ -78,6 +84,9 @@ export class PostgresStore implements AppStore {
     this.outbox = new PostgresOutboxEventRepository(this.queryable, this.tenantId);
     this.inbox = new PostgresInboxEventRepository(this.queryable, this.tenantId);
     this.matcher = new PostgresMatcherRepository(this.queryable, this.tenantId);
+    this.hostedIdentity = new PostgresHostedIdentityRepository(this.queryable, this.tenantId);
+    this.hostedAudit = new PostgresHostedAuditRepository(this.queryable, this.tenantId);
+    this.hostedSecrets = new PostgresHostedSecretRepository(this.queryable, this.tenantId);
   }
 
   async transaction<T>(fn: (repos: RepositorySet) => Promise<T>): Promise<T> {
@@ -117,6 +126,143 @@ class PostgresMatcherRepository implements MatcherQueryRepository {
     const lowered = lowerPostgresMatcherTaskIds(projectId, query, filters);
     const result = await this.db.query(lowered.taskIds.sql, [this.tenantId, ...lowered.taskIds.params]);
     return result.rows.map((row) => String(row.id));
+  }
+}
+
+class PostgresHostedIdentityRepository implements HostedIdentityRepository {
+  constructor(private readonly db: Queryable, private readonly tenantId: string) {}
+
+  async sync(identity: HostedIdentity): Promise<void> {
+    const now = nowIso();
+    await this.db.query(`
+      insert into tenants (id, slug, name, workos_organization_id, created_at, updated_at, archived_at)
+      values ($1, $2, $3, $4, $5, $5, null)
+      on conflict (id) do update set
+        workos_organization_id = excluded.workos_organization_id,
+        updated_at = excluded.updated_at
+    `, [
+      identity.tenantId,
+      identity.tenantId.toLowerCase(),
+      identity.organizationId,
+      identity.organizationId,
+      now
+    ]);
+    await this.db.query(`
+      insert into tenant_members (
+        tenant_id, principal_id, role, workos_user_id, roles_json, permissions_json, role_source,
+        created_at, updated_at, disabled_at, last_seen_at
+      ) values (
+        $1, $2, $3, $2, $4::jsonb, $5::jsonb, $6, $7, $7, null, $7
+      )
+      on conflict (tenant_id, principal_id) do update set
+        role = excluded.role,
+        workos_user_id = excluded.workos_user_id,
+        roles_json = excluded.roles_json,
+        permissions_json = excluded.permissions_json,
+        role_source = excluded.role_source,
+        updated_at = excluded.updated_at,
+        disabled_at = null,
+        last_seen_at = excluded.last_seen_at
+    `, [
+      this.tenantId,
+      identity.principalId,
+      identity.roles[0] ?? "member",
+      JSON.stringify(identity.roles),
+      JSON.stringify(identity.permissions),
+      identity.issuedBy,
+      now
+    ]);
+  }
+
+  async tenantRole(principalId: string): Promise<string | null> {
+    const result = await this.db.query(`
+      select role from tenant_members
+      where tenant_id = $1 and principal_id = $2 and disabled_at is null
+    `, [this.tenantId, principalId]);
+    return result.rows[0]?.role ? String(result.rows[0].role) : null;
+  }
+
+  async projectRole(projectId: string, principalId: string): Promise<string | null> {
+    const result = await this.db.query(`
+      select role from project_members
+      where tenant_id = $1 and project_id = $2 and principal_id = $3 and disabled_at is null
+    `, [this.tenantId, projectId, principalId]);
+    return result.rows[0]?.role ? String(result.rows[0].role) : null;
+  }
+}
+
+class PostgresHostedAuditRepository implements HostedAuditRepository {
+  constructor(private readonly db: Queryable, private readonly tenantId: string) {}
+
+  async append(event: HostedAuditEvent): Promise<void> {
+    await this.db.query(`
+      insert into hosted_audit_events (
+        tenant_id, project_id, id, event_type, principal_id, subject_type, subject_id,
+        message, data_json, request_id, ip_address, user_agent, created_at
+      ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13)
+    `, [
+      this.tenantId,
+      event.projectId,
+      event.id,
+      event.eventType,
+      event.principalId,
+      event.subjectType,
+      event.subjectId,
+      event.message,
+      JSON.stringify(event.data),
+      event.requestId,
+      event.ipAddress,
+      event.userAgent,
+      event.createdAt
+    ]);
+  }
+
+  async list(options: { tenantId?: string | undefined; projectId?: string | null | undefined; limit?: number | undefined } = {}): Promise<HostedAuditEvent[]> {
+    const limit = Math.min(Math.max(options.limit ?? 100, 1), 1000);
+    const tenantId = options.tenantId ?? this.tenantId;
+    const result = options.projectId === undefined
+      ? await this.db.query("select * from hosted_audit_events where tenant_id = $1 order by created_at desc limit $2", [tenantId, limit])
+      : await this.db.query("select * from hosted_audit_events where tenant_id = $1 and project_id is not distinct from $2 order by created_at desc limit $3", [tenantId, options.projectId, limit]);
+    return result.rows.map(hostedAuditFromRow);
+  }
+}
+
+class PostgresHostedSecretRepository implements HostedSecretRepository {
+  constructor(private readonly db: Queryable, private readonly tenantId: string) {}
+
+  async create(secret: HostedSecret): Promise<void> {
+    await this.db.query(`
+      insert into hosted_secrets (
+        tenant_id, project_id, id, name, purpose, ciphertext, key_id, algorithm,
+        created_at, updated_at, rotated_at, archived_at
+      ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    `, hostedSecretParams(this.tenantId, secret));
+  }
+
+  async get(id: string): Promise<HostedSecret | null> {
+    const result = await this.db.query("select * from hosted_secrets where tenant_id = $1 and id = $2", [this.tenantId, id]);
+    return result.rows[0] ? hostedSecretFromRow(result.rows[0]) : null;
+  }
+
+  async findByName(projectId: string | null, name: string): Promise<HostedSecret | null> {
+    const result = await this.db.query(`
+      select * from hosted_secrets
+      where tenant_id = $1 and project_id is not distinct from $2 and lower(name) = lower($3) and archived_at is null
+    `, [this.tenantId, projectId, name]);
+    return result.rows[0] ? hostedSecretFromRow(result.rows[0]) : null;
+  }
+
+  async update(secret: HostedSecret): Promise<void> {
+    await this.db.query(`
+      update hosted_secrets set
+        name = $4, purpose = $5, ciphertext = $6, key_id = $7, algorithm = $8,
+        updated_at = $10, rotated_at = $11, archived_at = $12
+      where tenant_id = $1 and project_id is not distinct from $2 and id = $3
+    `, hostedSecretParams(this.tenantId, secret));
+  }
+
+  async archive(id: string, archivedAt: string): Promise<void> {
+    await this.db.query("update hosted_secrets set archived_at = $3, updated_at = $3 where tenant_id = $1 and id = $2", [this.tenantId, id, archivedAt]);
   }
 }
 
@@ -990,6 +1136,58 @@ function projectFromRow(row: any): Project {
 
 function migrationFromRow(row: any): Migration {
   return { id: row.id, name: row.name, appliedAt: iso(row.applied_at) };
+}
+
+function hostedAuditFromRow(row: any): HostedAuditEvent {
+  return {
+    tenantId: row.tenant_id,
+    projectId: row.project_id,
+    id: row.id,
+    eventType: row.event_type,
+    principalId: row.principal_id,
+    subjectType: row.subject_type,
+    subjectId: row.subject_id,
+    message: row.message,
+    data: jsonRecord(row.data_json),
+    requestId: row.request_id,
+    ipAddress: row.ip_address,
+    userAgent: row.user_agent,
+    createdAt: iso(row.created_at)
+  };
+}
+
+function hostedSecretParams(tenantId: string, secret: HostedSecret): unknown[] {
+  return [
+    tenantId,
+    secret.projectId,
+    secret.id,
+    secret.name,
+    secret.purpose,
+    secret.ciphertext,
+    secret.keyId,
+    secret.algorithm,
+    secret.createdAt,
+    secret.updatedAt,
+    secret.rotatedAt,
+    secret.archivedAt
+  ];
+}
+
+function hostedSecretFromRow(row: any): HostedSecret {
+  return {
+    tenantId: row.tenant_id,
+    projectId: row.project_id,
+    id: row.id,
+    name: row.name,
+    purpose: row.purpose,
+    ciphertext: row.ciphertext,
+    keyId: row.key_id,
+    algorithm: row.algorithm,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+    rotatedAt: nullableIso(row.rotated_at),
+    archivedAt: nullableIso(row.archived_at)
+  };
 }
 
 function outboxEventFromRow(row: any): OutboxEvent {

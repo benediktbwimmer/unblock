@@ -2,6 +2,9 @@ import type {
   Activity,
   Comment,
   Dependency,
+  HostedAuditEvent,
+  HostedIdentity,
+  HostedSecret,
   Migration,
   Project,
   QueueFeed,
@@ -157,6 +160,29 @@ export interface InboxEventRepository {
   markDead(id: string, error: Record<string, unknown>, evidence?: Record<string, unknown>): Promise<InboxEvent | null>;
 }
 
+export interface HostedIdentityRepository {
+  sync(identity: HostedIdentity): Promise<void>;
+  tenantRole(principalId: string): Promise<string | null>;
+  projectRole(projectId: string, principalId: string): Promise<string | null>;
+}
+
+export interface HostedAuditRepository {
+  append(event: HostedAuditEvent): Promise<void>;
+  list(options?: {
+    tenantId?: string | undefined;
+    projectId?: string | null | undefined;
+    limit?: number | undefined;
+  }): Promise<HostedAuditEvent[]>;
+}
+
+export interface HostedSecretRepository {
+  create(secret: HostedSecret): Promise<void>;
+  get(id: string): Promise<HostedSecret | null>;
+  findByName(projectId: string | null, name: string): Promise<HostedSecret | null>;
+  update(secret: HostedSecret): Promise<void>;
+  archive(id: string, archivedAt: string): Promise<void>;
+}
+
 export interface MatcherQueryRepository {
   matchTaskIds(projectId: string, query: string, filters?: Omit<TaskListFilters, "where">): Promise<string[]>;
   matchingInstructionIds?(
@@ -197,6 +223,9 @@ export interface RepositorySet {
 export interface AppStore extends RepositorySet {
   readonly capabilities?: StoreCapabilities;
   matcher?: MatcherQueryRepository;
+  hostedIdentity?: HostedIdentityRepository;
+  hostedAudit?: HostedAuditRepository;
+  hostedSecrets?: HostedSecretRepository;
   transaction<T>(fn: (repos: RepositorySet) => Promise<T>): Promise<T>;
   close?(): Promise<void> | void;
 }

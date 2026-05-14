@@ -332,5 +332,82 @@ export const postgresMigrations: StoreMigration[] = [
         on comments(tenant_id, project_id, lower(machine), lower(actor), task_id, created_at)
         where archived_at is null;
     `
+  },
+  {
+    id: "pg0003",
+    name: "hosted identity audit and secrets foundation",
+    sql: `
+      alter table tenants add column if not exists workos_organization_id text null;
+      alter table tenants add column if not exists metadata_json jsonb not null default '{}'::jsonb;
+
+      create unique index if not exists tenants_workos_organization_idx
+        on tenants(workos_organization_id)
+        where workos_organization_id is not null;
+
+      alter table tenant_members add column if not exists workos_user_id text null;
+      alter table tenant_members add column if not exists workos_membership_id text null;
+      alter table tenant_members add column if not exists roles_json jsonb not null default '[]'::jsonb;
+      alter table tenant_members add column if not exists permissions_json jsonb not null default '[]'::jsonb;
+      alter table tenant_members add column if not exists role_source text not null default 'workos';
+      alter table tenant_members add column if not exists last_seen_at timestamptz null;
+
+      create index if not exists tenant_members_workos_user_idx
+        on tenant_members(tenant_id, workos_user_id)
+        where disabled_at is null;
+
+      alter table project_members add column if not exists roles_json jsonb not null default '[]'::jsonb;
+      alter table project_members add column if not exists permissions_json jsonb not null default '[]'::jsonb;
+      alter table project_members add column if not exists last_seen_at timestamptz null;
+
+      create table if not exists hosted_audit_events (
+        tenant_id text not null references tenants(id) on delete restrict,
+        project_id text null,
+        id text primary key,
+        event_type text not null,
+        principal_id text null,
+        subject_type text not null,
+        subject_id text null,
+        message text not null,
+        data_json jsonb not null default '{}'::jsonb,
+        request_id text null,
+        ip_address text null,
+        user_agent text null,
+        created_at timestamptz not null,
+        foreign key (tenant_id, project_id) references projects(tenant_id, id) on delete restrict
+      );
+
+      create index if not exists hosted_audit_events_tenant_created_idx
+        on hosted_audit_events(tenant_id, created_at desc);
+      create index if not exists hosted_audit_events_project_created_idx
+        on hosted_audit_events(tenant_id, project_id, created_at desc)
+        where project_id is not null;
+      create index if not exists hosted_audit_events_principal_created_idx
+        on hosted_audit_events(tenant_id, principal_id, created_at desc)
+        where principal_id is not null;
+      create index if not exists hosted_audit_events_subject_created_idx
+        on hosted_audit_events(tenant_id, subject_type, subject_id, created_at desc);
+
+      create table if not exists hosted_secrets (
+        tenant_id text not null references tenants(id) on delete restrict,
+        project_id text null,
+        id text primary key,
+        name text not null,
+        purpose text not null,
+        ciphertext text not null,
+        key_id text not null,
+        algorithm text not null,
+        created_at timestamptz not null,
+        updated_at timestamptz not null,
+        rotated_at timestamptz null,
+        archived_at timestamptz null,
+        foreign key (tenant_id, project_id) references projects(tenant_id, id) on delete restrict
+      );
+
+      create unique index if not exists hosted_secrets_active_name_idx
+        on hosted_secrets(tenant_id, coalesce(project_id, ''), lower(name))
+        where archived_at is null;
+      create index if not exists hosted_secrets_project_idx
+        on hosted_secrets(tenant_id, project_id, archived_at, updated_at desc);
+    `
   }
 ];

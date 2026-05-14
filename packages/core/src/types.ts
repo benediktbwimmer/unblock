@@ -18,7 +18,7 @@ export type Priority = z.infer<typeof prioritySchema>;
 
 export type ComputedStatus = "ready" | "blocked" | "started" | "finished" | "archived";
 export type RollupStatus = "leaf" | "complete" | "blocked-by-children";
-export type SubjectType = "project" | "task" | "comment" | "tag" | "track" | "instruction" | "view" | "feed" | "import" | "export" | "system";
+export type SubjectType = "project" | "task" | "comment" | "tag" | "track" | "instruction" | "view" | "feed" | "import" | "export" | "system" | "tenant" | "auth" | "connector" | "secret" | "audit";
 export type OutputFormat = "table" | "json" | "markdown";
 export type TaskSort = "dependency" | "priority" | "depth" | "created" | "updated" | "id" | "title";
 
@@ -128,6 +128,61 @@ export interface Activity {
 
 export interface ActivityView extends Activity {
   task: TaskView | null;
+}
+
+export type HostedRole = "owner" | "admin" | "security_admin" | "connector_admin" | "member" | "viewer";
+
+export type HostedPermission =
+  | "tenant:admin"
+  | "tenant:audit:read"
+  | "tenant:secrets:manage"
+  | "project:admin"
+  | "project:write"
+  | "project:read"
+  | "connector:admin"
+  | "connector:sync"
+  | "operator:read";
+
+export interface HostedIdentity {
+  tenantId: string;
+  principalId: string;
+  organizationId: string;
+  sessionId: string | null;
+  roles: HostedRole[];
+  permissions: HostedPermission[];
+  issuedBy: "workos" | "trusted_headers" | "test";
+  rawClaims?: Record<string, unknown> | undefined;
+}
+
+export interface HostedAuditEvent {
+  tenantId: string;
+  projectId: string | null;
+  id: string;
+  eventType: string;
+  principalId: string | null;
+  subjectType: SubjectType;
+  subjectId: string | null;
+  message: string;
+  data: Record<string, unknown>;
+  requestId: string | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  createdAt: string;
+}
+
+export interface HostedSecret {
+  tenantId: string;
+  projectId: string | null;
+  id: string;
+  name: string;
+  purpose: string;
+  ciphertext: string;
+  keyId: string;
+  algorithm: string;
+  createdAt: string;
+  updatedAt: string;
+  rotatedAt: string | null;
+  archivedAt: string | null;
 }
 
 export interface Instruction {

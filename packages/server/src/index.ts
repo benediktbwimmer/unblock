@@ -22,6 +22,15 @@ import {
   type TaskSize,
   type TaskSort
 } from "@unblock/core";
+import {
+  enforceHostedRateLimit,
+  enforceHostedRequest,
+  hostedRuntimeConfig,
+  requestId,
+  resolveHostedIdentity,
+  syncHostedIdentity,
+  type HostedRequestContext
+} from "./hosted-auth.js";
 
 export type UnblockBackend = "sqlite" | "postgres" | "hosted" | "prism";
 
@@ -31,6 +40,7 @@ export interface ServerOptions {
   postgresUrl?: string | undefined;
   configPath?: string | undefined;
   storeFactory?: (() => AppStore | Promise<AppStore>) | undefined;
+  hostedAuth?: ReturnType<typeof hostedRuntimeConfig> | undefined;
 }
 
 export function createApp(options: ServerOptions = {}) {
@@ -60,10 +70,16 @@ export function createApp(options: ServerOptions = {}) {
   });
 
   app.use("/api/*", async (c, next) => {
-    const store = await openStore(options);
+    const hosted = await hostedContextForRequest(c, options);
+    const store = await openStore(options, hosted?.identity.tenantId);
     c.set("services", createServices(store));
     c.set("store", store);
     c.set("configPath", options.configPath ?? process.env.UNBLOCK_CONFIG ?? defaultUnblockConfigPath());
+    if (hosted) {
+      c.set("hosted", hosted);
+      await syncHostedIdentity(store, hosted.identity);
+      enforceHostedRateLimit(hosted.identity, options.hostedAuth ?? hostedRuntimeConfig());
+    }
     try {
       await next();
     } finally {
@@ -74,6 +90,11 @@ export function createApp(options: ServerOptions = {}) {
   app.onError((error, c) => {
     if (error instanceof UnblockError) {
       return c.json({ error: { code: error.code, message: error.message, details: error.details } }, error.code === "not_found" ? 404 : 400);
+    }
+    if (typeof error === "object" && error !== null && "status" in error && error.status === 429) {
+      const retryAfter = "retryAfter" in error ? Number(error.retryAfter) : 60;
+      c.header("Retry-After", String(retryAfter));
+      return c.json({ error: { code: "rate_limited", message: error instanceof Error ? error.message : "Rate limit exceeded." } }, 429);
     }
     return c.json({ error: { code: "internal", message: error instanceof Error ? error.message : String(error) } }, 500);
   });
@@ -273,6 +294,7 @@ async function scopedServices(c: Context): Promise<ReturnType<typeof createServi
   if (!await c.get("store").projects.get(projectId)) {
     throw new UnblockError("not_found", `project not found: ${projectId}`);
   }
+  await authorizeHosted(c, projectId);
   if (c.req.method === "GET" || c.req.path.startsWith("/api/export/")) {
     return createServices(c.get("store"), { projectId });
   }
@@ -281,8 +303,15 @@ async function scopedServices(c: Context): Promise<ReturnType<typeof createServi
 }
 
 async function globalMutationServices(c: Context): Promise<ReturnType<typeof createServices>> {
+  await authorizeHosted(c, null);
   const { machine, actor } = await requireConfigIdentity(c);
   return createServices(c.get("store"), { machine, actor });
+}
+
+async function authorizeHosted(c: Context, projectId: string | null): Promise<void> {
+  const hosted = c.get("hosted");
+  if (!hosted) return;
+  await enforceHostedRequest(c.get("store"), hosted, c.req.method, c.req.path, projectId, c.req.raw);
 }
 
 async function requireConfigIdentity(c: Context): Promise<{ machine: string; actor: string }> {
@@ -308,10 +337,11 @@ declare module "hono" {
     services: ReturnType<typeof createServices>;
     store: AppStore;
     configPath: string;
+    hosted?: HostedRequestContext;
   }
 }
 
-async function openStore(options: ServerOptions): Promise<AppStore> {
+async function openStore(options: ServerOptions, requestTenantId?: string | undefined): Promise<AppStore> {
   if (options.storeFactory) {
     return await options.storeFactory();
   }
@@ -332,9 +362,28 @@ async function openStore(options: ServerOptions): Promise<AppStore> {
   }
   return await createPostgresStore({
     connectionString: storage.postgresUrl,
-    tenantId: process.env.UNBLOCK_TENANT_ID,
+    tenantId: requestTenantId ?? process.env.UNBLOCK_TENANT_ID,
     autoMigrate: true
   });
+}
+
+async function hostedContextForRequest(c: Context, options: ServerOptions): Promise<HostedRequestContext | null> {
+  if (!await isHostedMode(options)) return null;
+  const config = options.hostedAuth ?? hostedRuntimeConfig();
+  const identity = await resolveHostedIdentity(c.req.raw.headers, config);
+  return { identity, requestId: requestId(c.req.raw.headers) };
+}
+
+async function isHostedMode(options: ServerOptions): Promise<boolean> {
+  const backend = (options.backend ?? process.env.UNBLOCK_BACKEND ?? process.env.UNBLOCK_STORAGE_MODE)?.trim().toLowerCase();
+  if (backend === "hosted") return true;
+  if (backend) return false;
+  const config = await readUnblockConfig(options.configPath ?? process.env.UNBLOCK_CONFIG ?? defaultUnblockConfigPath());
+  return resolveUnblockStorageConfig(config.config, process.env, {
+    mode: options.backend,
+    sqlitePath: options.databasePath,
+    postgresUrl: options.postgresUrl
+  }).mode === "hosted";
 }
 
 async function openLegacyPrismStore(): Promise<AppStore> {
