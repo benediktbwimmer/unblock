@@ -462,9 +462,13 @@ describe("unblock core services", () => {
     expect(report.counts.tasks).toBe(120);
     expect(report.phases.map((phase) => phase.name)).toEqual(expect.arrayContaining([
       "dashboard.ready",
+      "dashboard.blocked",
       "context.dependency_slice",
+      "task_context.explain",
+      "dependency_view.explain_many",
       "instructions.matching_ids",
-      "polling.concurrent_ready"
+      "polling.concurrent_ready",
+      "polling.frontend_mix"
     ]));
     expect(report.totals.reads).toBeGreaterThan(0);
   });

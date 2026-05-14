@@ -244,7 +244,7 @@ bench.command("matcher")
   .option("--instructions <count>", "instructions to seed", parseInteger)
   .option("--comments <count>", "comments to seed", parseInteger)
   .option("--iterations <count>", "read iterations per phase", parseInteger)
-  .option("--pollers <count>", "concurrent dashboard pollers", parseInteger)
+  .option("--pollers <count>", "concurrent frontend pollers", parseInteger)
   .action(async (options: {
     projectId?: string;
     tasks?: number;
@@ -290,7 +290,7 @@ bench.command("matrix")
   .option("--audit <count>", "storage scenario hosted audit count", parseInteger)
   .option("--read-tasks <count>", "matcher scenario task count", parseInteger)
   .option("--iterations <count>", "matcher scenario read iterations", parseInteger)
-  .option("--pollers <count>", "matcher scenario concurrent polling clients", parseInteger)
+  .option("--pollers <count>", "matcher scenario concurrent frontend pollers", parseInteger)
   .option("--keep-sqlite", "keep the temporary SQLite database after the run")
   .action(async (options: {
     modes: string;

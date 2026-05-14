@@ -273,6 +273,7 @@ export async function runMatcherReadBenchmark(store: AppStore, options: MatcherR
   const rootId = taskId(0);
   const dependencyTarget = taskId(Math.min(taskCount - 1, 1));
   const unblockTarget = taskId(Math.min(taskCount - 1, Math.max(2, Math.floor(taskCount / 2))));
+  const contextTarget = taskId(Math.min(taskCount - 1, Math.max(2, Math.floor(taskCount / 3))));
   const commonQueries = [
     `tag = bench-tag-000`,
     `assigned = ${machine}:bench-actor-0`,
@@ -291,6 +292,7 @@ export async function runMatcherReadBenchmark(store: AppStore, options: MatcherR
   await services.query.match("tag = bench-tag-000 and status = ready", 100, { sort: "priority" });
   await services.exports.markdown({ where: `depends on ${dependencyTarget}`, limit: 50 });
   await services.query.matchingInstructionIds();
+  await services.query.explain(contextTarget);
   const startedAt = performance.now();
   for (const query of commonQueries) {
     await measureRead(phases, `matcher.${query}`, iterations, async () =>
@@ -301,12 +303,27 @@ export async function runMatcherReadBenchmark(store: AppStore, options: MatcherR
   await measureRead(phases, "dashboard.ready", iterations, async () =>
     (await services.query.list({ status: "ready", sort: "priority" })).length
   );
+  await measureRead(phases, "dashboard.blocked", iterations, async () =>
+    (await services.query.list({ status: "blocked", sort: "dependency" })).length
+  );
+  await measureRead(phases, "dashboard.started", iterations, async () =>
+    (await services.query.list({ lifecycle: "started", sort: "updated" })).length
+  );
   await measureRead(phases, "queue.backend_ready", iterations, async () =>
     (await services.query.match("tag = bench-tag-000 and status = ready", 100, { sort: "priority" })).length
   );
   await measureRead(phases, "context.dependency_slice", iterations, async () =>
     (await services.exports.markdown({ where: `depends on ${dependencyTarget}`, limit: 50 })).length
   );
+  await measureRead(phases, "task_context.explain", iterations, async () => {
+    const explanation = await services.query.explain(contextTarget);
+    return explanation.dependencies.length + explanation.directDependents.length + explanation.instructions.length;
+  });
+  await measureRead(phases, "dependency_view.explain_many", iterations, async () => {
+    const targets = Array.from({ length: Math.min(10, taskCount) }, (_item, index) => taskId(index));
+    const explanations = await Promise.all(targets.map((id) => services.query.explain(id)));
+    return explanations.reduce((sum, explanation) => sum + explanation.dependencies.length + explanation.directDependents.length, 0);
+  }, Math.min(10, taskCount));
   await measureRead(phases, "instructions.matching_ids", iterations, async () =>
     (await services.query.matchingInstructionIds()).length
   );
@@ -316,6 +333,20 @@ export async function runMatcherReadBenchmark(store: AppStore, options: MatcherR
     ));
     return results.reduce((sum, count) => sum + count, 0);
   }, pollers);
+  await measureRead(phases, "polling.frontend_mix", iterations, async () => {
+    const results = await Promise.all(Array.from({ length: pollers }, async (_item, pollerIndex) => {
+      const taskIndex = pollerIndex % Math.max(1, taskCount);
+      const [ready, blocked, queue, explain, matcher] = await Promise.all([
+        services.query.list({ status: "ready", sort: "priority" }),
+        services.query.list({ status: "blocked", sort: "dependency" }),
+        services.query.match(`assigned = ${machine}:bench-actor-${pollerIndex % trackCount}`, 50, { sort: "dependency" }),
+        services.query.explain(taskId(taskIndex)),
+        services.query.match(commonQueries[pollerIndex % commonQueries.length] ?? "status = ready", 100, { includeFinished: true, sort: "id" })
+      ]);
+      return ready.length + blocked.length + queue.length + explain.dependencies.length + matcher.length;
+    }));
+    return results.reduce((sum, count) => sum + count, 0);
+  }, pollers * 5);
 
   const elapsedMs = roundMs(performance.now() - startedAt);
   const reads = phases.reduce((sum, phase) => sum + phase.count, 0);
