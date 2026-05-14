@@ -274,7 +274,7 @@ async function runProjectWorkload(options: RunnerOptions, projectIndex: number):
       );
     }, workload.tags.length));
 
-    phases.push(await phase("unblock.tasks.create", async () => {
+    phases.push(await phase("unblock.tasks.create.commit", async () => {
       const chunks = chunked(workload.tasks, bulkChunkSize(workload.tasks.length, options.concurrency));
       await parallelMap(chunks, options.concurrency, async (chunk) => {
         await services.tasks.addMany(chunk.map((task) => ({
@@ -285,19 +285,23 @@ async function runProjectWorkload(options: RunnerOptions, projectIndex: number):
           lifecycle: task.lifecycle,
         })));
       });
+    }, workload.tasks.length));
+    phases.push(await phase("unblock.tasks.create.visible", async () => {
       await waitFor(`tasks visible for ${projectOptions.unblockProjectId}`, options, async () =>
         (await store.tasks.list(projectOptions.unblockProjectId)).length >= options.tasks
       );
-    }, workload.tasks.length));
+    }));
 
-    phases.push(await phase("unblock.dependencies.create", async () => {
+    phases.push(await phase("unblock.dependencies.create.commit", async () => {
       await services.dependencies.addMany(workload.dependencies);
+    }, workload.dependencies.length));
+    phases.push(await phase("unblock.dependencies.create.visible", async () => {
       await waitFor(`dependencies visible for ${projectOptions.unblockProjectId}`, options, async () =>
         (await store.dependencies.list(projectOptions.unblockProjectId)).length >= workload.dependencies.length
       );
-    }, workload.dependencies.length));
+    }));
 
-    phases.push(await phase("unblock.task_tags.assign", async () => {
+    phases.push(await phase("unblock.task_tags.assign.commit", async () => {
       const tagsByTask = new Map<string, string[]>();
       for (const assignment of workload.taskTags) {
         const tags = tagsByTask.get(assignment.taskId) ?? [];
@@ -310,10 +314,12 @@ async function runProjectWorkload(options: RunnerOptions, projectIndex: number):
           chunk.map(([taskId, tagIds]) => ({ taskId, tagIdsOrNames: tagIds })),
         );
       });
+    }, workload.taskTags.length));
+    phases.push(await phase("unblock.task_tags.assign.visible", async () => {
       await waitFor(`task tags visible for ${projectOptions.unblockProjectId}`, options, async () =>
         (await store.tags.listTaskTags(projectOptions.unblockProjectId)).length >= workload.taskTags.length
       );
-    }, workload.taskTags.length));
+    }));
 
     phases.push(await phase("unblock.instructions.create", async () => {
       await services.instructions.addMany(workload.instructions);
@@ -825,7 +831,7 @@ function chunked<T>(items: T[], size: number): T[][] {
 }
 
 function bulkChunkSize(count: number, concurrency: number): number {
-  return Math.max(250, Math.max(1, Math.ceil(count / concurrency)));
+  return Math.max(1_000, Math.max(1, Math.ceil(count / concurrency)));
 }
 
 async function stopProcess(child: PrismProcess): Promise<void> {

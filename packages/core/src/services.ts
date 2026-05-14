@@ -848,12 +848,26 @@ export class TagService {
     const createdAt = nowIso();
     await this.store.transaction(async (repos) => {
       await repos.tasks.get(this.projectId, taskId) ?? notFound("task", taskId);
+      const taskTags: Array<{ taskTag: TaskTag; tag: Tag }> = [];
       for (const tagIdOrName of tagIdsOrNames) {
         const tag = await repos.tags.get(this.projectId, normalizeId(tagIdOrName)) ?? await repos.tags.findByName(this.projectId, tagIdOrName) ?? notFound("tag", tagIdOrName);
         if (tag.archivedAt) {
           validation("Archived tags cannot be assigned.", { tagId: tag.id });
         }
-        await repos.tags.addTaskTag({ projectId: this.projectId, taskId, tagId: tag.id, createdAt });
+        if (repos.tags.hasTaskTag && await repos.tags.hasTaskTag(this.projectId, taskId, tag.id)) {
+          continue;
+        }
+        taskTags.push({ taskTag: { projectId: this.projectId, taskId, tagId: tag.id, createdAt }, tag });
+      }
+      if (taskTags.length === 0) {
+        return;
+      }
+      if (repos.tags.addTaskTags) {
+        await repos.tags.addTaskTags(taskTags);
+      } else {
+        for (const { taskTag } of taskTags) {
+          await repos.tags.addTaskTag(taskTag);
+        }
       }
       await repos.activity.append(this.activity.make(this.projectId, "tag.assigned", "task", taskId, `Assigned tags to ${taskId}`, { tags: tagIdsOrNames }));
     });
@@ -886,7 +900,6 @@ export class TagService {
       const tagsByName = new Map(tags.map((tag) => [tag.name, tag]));
       const assigned = new Set<string>();
       const taskTags: Array<{ taskTag: TaskTag; tag: Tag }> = [];
-      let assignmentCount = 0;
 
       for (const input of normalized) {
         if (!taskIds.has(input.taskId)) {
@@ -900,7 +913,6 @@ export class TagService {
           const key = `${input.taskId}\0${tag.id}`;
           if (assigned.has(key)) continue;
           assigned.add(key);
-          assignmentCount += 1;
           taskTags.push({
             taskTag: { projectId: this.projectId, taskId: input.taskId, tagId: tag.id, createdAt },
             tag,
@@ -908,14 +920,25 @@ export class TagService {
         }
       }
 
+      let newTaskTags = taskTags;
+      if (repos.tags.hasTaskTag && taskTags.length <= 100) {
+        const existing = await Promise.all(taskTags.map(async (item) =>
+          await repos.tags.hasTaskTag!(this.projectId, item.taskTag.taskId, item.taskTag.tagId)
+        ));
+        newTaskTags = taskTags.filter((_item, index) => !existing[index]);
+      }
+      if (newTaskTags.length === 0) {
+        return;
+      }
+
       if (repos.tags.addTaskTags) {
-        await repos.tags.addTaskTags(taskTags);
+        await repos.tags.addTaskTags(newTaskTags);
       } else {
-        for (const { taskTag } of taskTags) {
+        for (const { taskTag } of newTaskTags) {
           await repos.tags.addTaskTag(taskTag);
         }
       }
-      await repos.activity.append(this.activity.make(this.projectId, "tag.batch_assigned", "project", this.projectId, `Assigned ${assignmentCount} task tags`, { count: assignmentCount }));
+      await repos.activity.append(this.activity.make(this.projectId, "tag.batch_assigned", "project", this.projectId, `Assigned ${newTaskTags.length} task tags`, { count: newTaskTags.length }));
     });
   }
 
