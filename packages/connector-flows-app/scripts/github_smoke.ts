@@ -411,9 +411,6 @@ export async function runGithubE2E(
     ...env,
     UNBLOCK_SMOKE_GITHUB_WEBHOOK: "1",
   });
-  if (!env.PRISM_FLOWS_RUNTIME_PLAN?.trim()) {
-    missing.push("PRISM_FLOWS_RUNTIME_PLAN");
-  }
   if (missing.length > 0) {
     return {
       ok: false,
@@ -444,7 +441,6 @@ export async function runGithubE2E(
   const [owner, repo] = parseRepository(required(env, "GITHUB_REPOSITORY"));
   const webhookUrl = required(env, "UNBLOCK_SMOKE_GITHUB_WEBHOOK_URL");
   const webhookSecret = required(env, "UNBLOCK_SMOKE_GITHUB_WEBHOOK_SECRET");
-  const runtimePlanPath = required(env, "PRISM_FLOWS_RUNTIME_PLAN");
   const timeoutMs = Number(env.UNBLOCK_SMOKE_TIMEOUT_MS ?? 30_000);
   const runId = now().toISOString().replace(/[:.]/g, "-");
   const steps: SmokeStep[] = [];
@@ -648,61 +644,19 @@ export async function runGithubE2E(
       taskId: `GH-${Number(scheduledIssue.number)}`,
       phase: "scheduled-reconcile",
     });
-    await timed(steps, "prism.github.scheduled_reconcile_flow", async () => {
-      const { admitDueSchedules } = await import(
-        "../../../../prism-new3/packages/prism-flows/schedules.ts"
-      );
-      const { DenoGrpcPrismFlowClient } = await import(
-        "../../../../prism-new3/packages/prism-flows/execution-deno.ts"
-      );
-      const runtimePlan = JSON.parse(await Deno.readTextFile(runtimePlanPath));
-      const client = new DenoGrpcPrismFlowClient({
-        endpoint: prismRuntimeEndpoint,
-        runtimePlan,
-        defaultProjectId: prismProjectId,
-        timeoutMs,
-      });
-      try {
-        const results = await admitDueSchedules({
-          runtimePlan,
-          client,
-          projectId: prismProjectId,
-          tenantId,
-          unblockProjectId: projectId,
-          connectionId,
-          force: true,
-          now: now(),
-          payloadOverlay: {
-            tenantId,
-            projectId,
-            connectionId,
-            cursor: scheduledCursor,
-            reason: "scheduled-e2e",
-          },
-        });
-        if (
-          !results.some((result) =>
-            result.due && result.trigger.flowId === "github-issues-reconcile"
-          )
-        ) {
-          throw new Error(
-            `Scheduled reconcile trigger did not start: ${
-              JSON.stringify(results)
-            }`,
-          );
-        }
-      } finally {
-        client.close();
-      }
-    });
-    await waitForTask(
-      fetchImpl,
-      baseUrl,
-      unblockAuth,
-      projectId,
-      `GH-${Number(scheduledIssue.number)}`,
-      scheduledIssue.title,
-      timeoutMs,
+    await timed(
+      steps,
+      "prism.github.scheduled_reconcile_observed",
+      () =>
+        waitForTask(
+          fetchImpl,
+          baseUrl,
+          unblockAuth,
+          projectId,
+          `GH-${Number(scheduledIssue.number)}`,
+          scheduledIssue.title,
+          timeoutMs,
+        ),
     );
     await timed(steps, "unblock.github.cursor.confirm", async () => {
       const status = await waitForJson(() =>

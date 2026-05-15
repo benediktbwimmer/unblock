@@ -95,7 +95,7 @@ Deno.test("GitHub smoke runner requires webhook URL and secret in real webhook m
   }
 });
 
-Deno.test("GitHub e2e runner requires runtime plan and real webhook environment", async () => {
+Deno.test("GitHub e2e runner requires real webhook environment without runtime plan", async () => {
   const result = await runGithubE2E({
     UNBLOCK_HOSTED_API_URL: "http://127.0.0.1:39217",
     UNBLOCK_HOSTED_API_TOKEN: "unblock-token",
@@ -105,13 +105,12 @@ Deno.test("GitHub e2e runner requires runtime plan and real webhook environment"
     GITHUB_REPOSITORY: "benediktbwimmer/unblock",
     GITHUB_TOKEN: "github-token",
     GITHUB_INSTALLATION_TOKEN: "github-token",
-    UNBLOCK_SMOKE_GITHUB_WEBHOOK_URL:
-      "https://example.test/webhooks/github/issues",
-    UNBLOCK_SMOKE_GITHUB_WEBHOOK_SECRET: "secret",
   }, { allowMissingEnv: true });
   if (
-    !result.skipped || !result.missing?.includes("PRISM_FLOWS_RUNTIME_PLAN")
+    !result.skipped ||
+    !result.missing?.includes("UNBLOCK_SMOKE_GITHUB_WEBHOOK_URL") ||
+    result.missing?.includes("PRISM_FLOWS_RUNTIME_PLAN")
   ) {
-    throw new Error("e2e preflight did not require PRISM_FLOWS_RUNTIME_PLAN");
+    throw new Error("e2e preflight did not require only real webhook inputs");
   }
 });
