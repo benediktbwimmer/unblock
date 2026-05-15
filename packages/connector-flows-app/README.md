@@ -29,7 +29,8 @@ Current fixture:
   polling request shaping and issue list normalization for reconciliation.
 - `unblock-hosted-api`: redacted bearer-token connection to hosted Unblock.
 - `github-api`: rate-limited GitHub REST API connection for installation-token
-  issue writes.
+  issue writes. Set `GITHUB_API_BASE_URL` to point both the smoke runner and
+  Prism Flow HTTP connection at the local simulator.
 - `mock-external`: redacted API-key connection for the mocked connector target.
 
 Run locally:
@@ -83,3 +84,25 @@ For local smoke runs, `GITHUB_INSTALLATION_TOKEN` may be the same token if the
 repository permissions are sufficient.
 
 The app imports the local Prism Flows SDK from `~/code/prism-new3`.
+
+Run the GitHub simulator for deterministic connector tests and benchmarks:
+
+```sh
+deno run --allow-net packages/connector-flows-app/scripts/github_simulator.ts --port=49090
+```
+
+Then run the smoke or full E2E with:
+
+```sh
+GITHUB_API_BASE_URL=http://127.0.0.1:49090 \
+GITHUB_REPOSITORY=owner/repo \
+GITHUB_TOKEN=sim-token \
+GITHUB_INSTALLATION_TOKEN=sim-token \
+deno run --allow-env --allow-net --allow-read packages/connector-flows-app/scripts/github_smoke.ts
+```
+
+The simulator implements the GitHub Issues and repository webhook endpoints used
+by the connector, signs outgoing `issues` webhooks with the configured hook
+secret, records deliveries under `/_sim/deliveries`, exposes state at
+`/_sim/state`, and can force primary, secondary, and content creation rate-limit
+responses for benchmark scenarios.

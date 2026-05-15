@@ -103,6 +103,7 @@ export async function runGithubSmoke(
   const connectionId = env.UNBLOCK_GITHUB_CONNECTION_ID?.trim() ||
     "github-main";
   const githubToken = required(env, "GITHUB_TOKEN");
+  const githubApiBaseUrl = githubBaseUrl(env);
   const [owner, repo] = parseRepository(required(env, "GITHUB_REPOSITORY"));
   const runId = now().toISOString().replace(/[:.]/g, "-");
   const title = `[unblock-smoke] ${runId}`;
@@ -121,6 +122,7 @@ export async function runGithubSmoke(
           createGitHubIssueWebhook(
             fetchImpl,
             githubToken,
+            githubApiBaseUrl,
             owner,
             repo,
             required(env, "UNBLOCK_SMOKE_GITHUB_WEBHOOK_URL"),
@@ -136,6 +138,7 @@ export async function runGithubSmoke(
         githubJson(
           fetchImpl,
           githubToken,
+          githubApiBaseUrl,
           `/repos/${encodeURIComponent(owner)}/${
             encodeURIComponent(repo)
           }/issues`,
@@ -265,6 +268,7 @@ export async function runGithubSmoke(
           githubJson(
             fetchImpl,
             githubToken,
+            githubApiBaseUrl,
             `/repos/${encodeURIComponent(owner)}/${
               encodeURIComponent(repo)
             }/issues/${Number(issue.number)}`,
@@ -359,6 +363,7 @@ export async function runGithubSmoke(
           deleteGitHubWebhook(
             fetchImpl,
             githubToken,
+            githubApiBaseUrl,
             owner,
             repo,
             Number(hook.id),
@@ -380,6 +385,7 @@ export async function runGithubSmoke(
           githubJson(
             fetchImpl,
             githubToken,
+            githubApiBaseUrl,
             `/repos/${encodeURIComponent(owner)}/${
               encodeURIComponent(repo)
             }/issues/${Number(issue.number)}`,
@@ -438,6 +444,7 @@ export async function runGithubE2E(
   const connectionId = env.UNBLOCK_GITHUB_CONNECTION_ID?.trim() ||
     "github-main";
   const githubToken = required(env, "GITHUB_TOKEN");
+  const githubApiBaseUrl = githubBaseUrl(env);
   const [owner, repo] = parseRepository(required(env, "GITHUB_REPOSITORY"));
   const webhookUrl = required(env, "UNBLOCK_SMOKE_GITHUB_WEBHOOK_URL");
   const webhookSecret = required(env, "UNBLOCK_SMOKE_GITHUB_WEBHOOK_SECRET");
@@ -481,6 +488,7 @@ export async function runGithubE2E(
         createSmokeIssue(
           fetchImpl,
           githubToken,
+          githubApiBaseUrl,
           owner,
           repo,
           `[unblock-e2e-replay] ${runId}`,
@@ -550,6 +558,7 @@ export async function runGithubE2E(
         createSmokeIssue(
           fetchImpl,
           githubToken,
+          githubApiBaseUrl,
           owner,
           repo,
           `[unblock-e2e-manual] ${runId}`,
@@ -564,6 +573,7 @@ export async function runGithubE2E(
         waitForGitHubIssueListVisibility(
           fetchImpl,
           githubToken,
+          githubApiBaseUrl,
           owner,
           repo,
           Number(manualIssue.number),
@@ -617,6 +627,7 @@ export async function runGithubE2E(
         createSmokeIssue(
           fetchImpl,
           githubToken,
+          githubApiBaseUrl,
           owner,
           repo,
           `[unblock-e2e-scheduled] ${runId}`,
@@ -631,6 +642,7 @@ export async function runGithubE2E(
         waitForGitHubIssueListVisibility(
           fetchImpl,
           githubToken,
+          githubApiBaseUrl,
           owner,
           repo,
           Number(scheduledIssue.number),
@@ -689,7 +701,14 @@ export async function runGithubE2E(
           steps,
           `github.e2e.issue_${issueNumber}.cleanup`,
           () =>
-            closeGitHubIssue(fetchImpl, githubToken, owner, repo, issueNumber),
+            closeGitHubIssue(
+              fetchImpl,
+              githubToken,
+              githubApiBaseUrl,
+              owner,
+              repo,
+              issueNumber,
+            ),
         ).catch((error) => {
           steps.push({
             name: `github.e2e.issue_${issueNumber}.cleanup_error`,
@@ -882,10 +901,11 @@ async function unblockJson(
 async function githubJson(
   fetchImpl: typeof fetch,
   token: string,
+  baseUrl: string,
   path: string,
   init: JsonRequest = {},
 ) {
-  return await requestJson(fetchImpl, `https://api.github.com${path}`, token, {
+  return await requestJson(fetchImpl, `${baseUrl}${path}`, token, {
     ...init,
     headers: {
       Accept: "application/vnd.github+json",
@@ -898,6 +918,7 @@ async function githubJson(
 async function createSmokeIssue(
   fetchImpl: typeof fetch,
   token: string,
+  baseUrl: string,
   owner: string,
   repo: string,
   title: string,
@@ -906,6 +927,7 @@ async function createSmokeIssue(
   return await githubJson(
     fetchImpl,
     token,
+    baseUrl,
     `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`,
     {
       method: "POST",
@@ -923,6 +945,7 @@ async function createSmokeIssue(
 async function waitForGitHubIssueListVisibility(
   fetchImpl: typeof fetch,
   token: string,
+  baseUrl: string,
   owner: string,
   repo: string,
   issueNumber: number,
@@ -933,6 +956,7 @@ async function waitForGitHubIssueListVisibility(
     githubJson(
       fetchImpl,
       token,
+      baseUrl,
       `/repos/${encodeURIComponent(owner)}/${
         encodeURIComponent(repo)
       }/issues?state=all&per_page=100&since=${encodeURIComponent(since)}`,
@@ -948,6 +972,7 @@ async function waitForGitHubIssueListVisibility(
 async function closeGitHubIssue(
   fetchImpl: typeof fetch,
   token: string,
+  baseUrl: string,
   owner: string,
   repo: string,
   issueNumber: number,
@@ -955,6 +980,7 @@ async function closeGitHubIssue(
   return await githubJson(
     fetchImpl,
     token,
+    baseUrl,
     `/repos/${encodeURIComponent(owner)}/${
       encodeURIComponent(repo)
     }/issues/${issueNumber}`,
@@ -1038,6 +1064,7 @@ async function hmacSha256Hex(secret: string, body: string): Promise<string> {
 async function createGitHubIssueWebhook(
   fetchImpl: typeof fetch,
   token: string,
+  baseUrl: string,
   owner: string,
   repo: string,
   url: string,
@@ -1046,6 +1073,7 @@ async function createGitHubIssueWebhook(
   return await githubJson(
     fetchImpl,
     token,
+    baseUrl,
     `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/hooks`,
     {
       method: "POST",
@@ -1067,6 +1095,7 @@ async function createGitHubIssueWebhook(
 async function deleteGitHubWebhook(
   fetchImpl: typeof fetch,
   token: string,
+  baseUrl: string,
   owner: string,
   repo: string,
   hookId: number,
@@ -1074,6 +1103,7 @@ async function deleteGitHubWebhook(
   return await githubJson(
     fetchImpl,
     token,
+    baseUrl,
     `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/hooks/${
       encodeURIComponent(String(hookId))
     }`,
@@ -1191,6 +1221,12 @@ function usesTrustedHeaders(env: Env): boolean {
 function usesRealGitHubWebhook(env: Env): boolean {
   return env.UNBLOCK_SMOKE_GITHUB_WEBHOOK?.trim() === "1" ||
     !!env.UNBLOCK_SMOKE_GITHUB_WEBHOOK_URL?.trim();
+}
+
+function githubBaseUrl(env: Env): string {
+  return trimTrailingSlash(
+    env.GITHUB_API_BASE_URL?.trim() || "https://api.github.com",
+  );
 }
 
 function required(env: Env, key: string): string {

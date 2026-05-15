@@ -16,7 +16,9 @@ Deno.test("GitHub webhook trigger declares signature dedupe and correlation", ()
     throw new Error("GitHub inbound flow does not declare a webhook trigger");
   }
   if (webhook.signature !== "github") {
-    throw new Error("GitHub inbound webhook does not declare GitHub signature verification");
+    throw new Error(
+      "GitHub inbound webhook does not declare GitHub signature verification",
+    );
   }
   if (!webhook.dedupeKey) {
     throw new Error("GitHub inbound webhook does not declare delivery dedupe");
@@ -27,32 +29,51 @@ Deno.test("GitHub webhook trigger declares signature dedupe and correlation", ()
 });
 
 Deno.test("GitHub API connection is rate-limited and redacts auth", () => {
-  const connection = app.ir.connections.find((item) => item.id === "github-api");
+  const connection = app.ir.connections.find((item) =>
+    item.id === "github-api"
+  );
   if (!connection) {
     throw new Error("github-api connection is missing");
   }
-  if (connection.rateLimit?.concurrency !== 8 || connection.rateLimit.requestsPerSecond !== 4) {
+  if (
+    connection.rateLimit?.concurrency !== 8 ||
+    connection.rateLimit.requestsPerSecond !== 4
+  ) {
     throw new Error("github-api connection rate limit changed unexpectedly");
   }
   if (!connection.redaction?.request?.includes("authorization")) {
     throw new Error("github-api connection does not redact authorization");
   }
+  if (connection.baseUrlEnv !== "GITHUB_API_BASE_URL") {
+    throw new Error(
+      "github-api connection cannot be redirected to the simulator",
+    );
+  }
   if (!connection.network?.allowDomains?.includes("api.github.com")) {
     throw new Error("github-api connection does not constrain network egress");
+  }
+  if (!connection.network?.allowDomains?.includes("127.0.0.1")) {
+    throw new Error("github-api connection does not allow the local simulator");
   }
 });
 
 Deno.test("GitHub flows retain idempotency and retry policy in source", async () => {
   const source = [
-    await Deno.readTextFile(new URL("../flows/github-issues.ts", import.meta.url)),
-    await Deno.readTextFile(new URL("../jobs/github-connector.ts", import.meta.url)),
+    await Deno.readTextFile(
+      new URL("../flows/github-issues.ts", import.meta.url),
+    ),
+    await Deno.readTextFile(
+      new URL("../jobs/github-connector.ts", import.meta.url),
+    ),
   ].join("\n");
-  for (const expected of [
-    "idempotencyKey",
-    "retryOn: [\"429\", \"5xx\", \"network\"]",
-    "outcomeRecovery: \"reconcile_by_external_id\"",
-    "connector.cursor.updated",
-  ]) {
+  for (
+    const expected of [
+      "idempotencyKey",
+      'retryOn: ["429", "5xx", "network"]',
+      'outcomeRecovery: "reconcile_by_external_id"',
+      "connector.cursor.updated",
+    ]
+  ) {
     if (!source.includes(expected)) {
       throw new Error(`GitHub flow source is missing ${expected}`);
     }
@@ -79,11 +100,19 @@ Deno.test("GitHub reconcile uses stored cursors with a bounded replay window", (
       }],
     }],
   });
-  if (!String(prepared.request.path).includes("since=2026-05-14T09%3A58%3A00.000Z")) {
-    throw new Error(`GitHub reconcile did not apply replay cursor: ${prepared.request.path}`);
+  if (
+    !String(prepared.request.path).includes(
+      "since=2026-05-14T09%3A58%3A00.000Z",
+    )
+  ) {
+    throw new Error(
+      `GitHub reconcile did not apply replay cursor: ${prepared.request.path}`,
+    );
   }
   if (prepared.effectiveCursor !== "2026-05-14T10:00:00.000Z") {
-    throw new Error("GitHub reconcile did not retain the stored effective cursor");
+    throw new Error(
+      "GitHub reconcile did not retain the stored effective cursor",
+    );
   }
 });
 
