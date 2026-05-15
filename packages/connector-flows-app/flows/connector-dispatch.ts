@@ -1,4 +1,8 @@
-import { flow, manual, schedule } from "../../../../prism-new3/packages/prism-flows/mod.ts";
+import {
+  flow,
+  manual,
+  schedule,
+} from "../../../../prism-new3/packages/prism-flows/mod.ts";
 import { connectorDispatchInputSchema } from "../jobs/mock-connector.ts";
 
 flow("unblock-connector-dispatch", {
@@ -11,7 +15,8 @@ flow("unblock-connector-dispatch", {
     }),
   ],
   concurrency: {
-    key: (input: any) => input.event?.correlationId ?? "scheduled-reconciliation",
+    key: (input: any) =>
+      input.event?.correlationId ?? "scheduled-reconciliation",
     policy: "queue",
   },
   permissions: {
@@ -26,12 +31,18 @@ flow("unblock-connector-dispatch", {
   },
   run: async (ctx, input: any) => {
     if (!input.event) {
+      const reconciliationKey = ctx.trigger.scheduledFor ??
+        ctx.trigger.scheduledAt ?? ctx.run.key;
       return await ctx.http("unblock-hosted-api", {
         method: "POST",
         path: "/api/connectors/reconcile",
         body: input,
-        idempotencyKey: `unblock-reconcile:${new Date().toISOString().slice(0, 10)}`,
-        retry: { maxAttempts: 8, backoff: "exponential", retryOn: ["429", "5xx", "network"] },
+        idempotencyKey: `unblock-reconcile:${reconciliationKey}`,
+        retry: {
+          maxAttempts: 8,
+          backoff: "exponential",
+          retryOn: ["429", "5xx", "network"],
+        },
       });
     }
 
@@ -42,7 +53,11 @@ flow("unblock-connector-dispatch", {
       body: inbound,
       idempotencyKey: inbound.idempotencyKey,
       outcomeRecovery: "reconcile_by_external_id",
-      retry: { maxAttempts: 8, backoff: "exponential", retryOn: ["429", "5xx", "network"] },
+      retry: {
+        maxAttempts: 8,
+        backoff: "exponential",
+        retryOn: ["429", "5xx", "network"],
+      },
     });
   },
 });
