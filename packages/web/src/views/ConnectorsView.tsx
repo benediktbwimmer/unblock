@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { Check, Pause, Play, PlugZap, RotateCcw, Trash2, X } from "lucide-react";
 import { fetchJson, mutateJson, withProject } from "../api";
-import type { ConnectorSyncQueueItemRecord, ConnectorSyncQueueItemStatus, GitHubConnectionRecord } from "../types";
+import type { ConnectorSyncQueueItemRecord, ConnectorSyncQueueItemStatus, GitHubConnectionRecord, JiraConnectionRecord } from "../types";
 
-interface Draft {
+interface GitHubDraft {
   connectionId: string;
   appId: string;
   installationId: string;
@@ -13,7 +13,19 @@ interface Draft {
   webhookSecretId: string;
 }
 
-const emptyDraft: Draft = {
+interface JiraDraft {
+  connectionId: string;
+  siteUrl: string;
+  cloudId: string;
+  projectKey: string;
+  accountEmail: string;
+  tokenSecretId: string;
+  webhookSecretId: string;
+}
+
+type ProviderConnection = GitHubConnectionRecord | JiraConnectionRecord;
+
+const emptyGitHubDraft: GitHubDraft = {
   connectionId: "github-main",
   appId: "",
   installationId: "",
@@ -23,11 +35,23 @@ const emptyDraft: Draft = {
   webhookSecretId: ""
 };
 
+const emptyJiraDraft: JiraDraft = {
+  connectionId: "jira-main",
+  siteUrl: "",
+  cloudId: "",
+  projectKey: "",
+  accountEmail: "",
+  tokenSecretId: "",
+  webhookSecretId: ""
+};
+
 export function ConnectorsView({ projectId, onError }: { projectId: string; onError: (message: string | null) => void }) {
   const [connections, setConnections] = useState<GitHubConnectionRecord[]>([]);
+  const [jiraConnections, setJiraConnections] = useState<JiraConnectionRecord[]>([]);
   const [queueItems, setQueueItems] = useState<ConnectorSyncQueueItemRecord[]>([]);
   const [queueStatus, setQueueStatus] = useState<ConnectorSyncQueueItemStatus | "all">("all");
-  const [draft, setDraft] = useState<Draft>(emptyDraft);
+  const [draft, setDraft] = useState<GitHubDraft>(emptyGitHubDraft);
+  const [jiraDraft, setJiraDraft] = useState<JiraDraft>(emptyJiraDraft);
   const [loading, setLoading] = useState(false);
 
   async function load() {
@@ -36,11 +60,13 @@ export function ConnectorsView({ projectId, onError }: { projectId: string; onEr
       const queuePath = queueStatus === "all"
         ? withProject("/api/connectors/sync-queue", projectId)
         : `${withProject("/api/connectors/sync-queue", projectId)}&status=${encodeURIComponent(queueStatus)}`;
-      const [nextConnections, nextQueue] = await Promise.all([
+      const [nextConnections, nextJiraConnections, nextQueue] = await Promise.all([
         fetchJson<GitHubConnectionRecord[]>(withProject("/api/connectors/github/connections", projectId)),
+        fetchJson<JiraConnectionRecord[]>(withProject("/api/connectors/jira/connections", projectId)),
         fetchJson<ConnectorSyncQueueItemRecord[]>(queuePath)
       ]);
       setConnections(nextConnections);
+      setJiraConnections(nextJiraConnections);
       setQueueItems(nextQueue);
       onError(null);
     } catch (reason) {
@@ -69,17 +95,38 @@ export function ConnectorsView({ projectId, onError }: { projectId: string; onEr
           webhookSecretId: draft.webhookSecretId
         }
       });
-      setDraft(emptyDraft);
+      setDraft(emptyGitHubDraft);
       await load();
     });
   }
 
-  async function transition(connection: GitHubConnectionRecord, action: "pause" | "resume" | "delete") {
+  async function createJiraConnection() {
     await mutateConnector(async () => {
+      await mutateJson<JiraConnectionRecord>("/api/connectors/jira/connections", {
+        method: "POST",
+        body: {
+          projectId,
+          connectionId: jiraDraft.connectionId,
+          siteUrl: jiraDraft.siteUrl,
+          cloudId: jiraDraft.cloudId || null,
+          projectKey: jiraDraft.projectKey,
+          accountEmail: jiraDraft.accountEmail || undefined,
+          tokenSecretId: jiraDraft.tokenSecretId,
+          webhookSecretId: jiraDraft.webhookSecretId
+        }
+      });
+      setJiraDraft(emptyJiraDraft);
+      await load();
+    });
+  }
+
+  async function transition(connection: ProviderConnection, action: "pause" | "resume" | "delete") {
+    await mutateConnector(async () => {
+      const provider = connection.provider;
       const path = action === "delete"
-        ? withProject(`/api/connectors/github/connections/${connection.id}`, projectId)
-        : withProject(`/api/connectors/github/connections/${connection.id}/${action}`, projectId);
-      await mutateJson<GitHubConnectionRecord>(path, { method: action === "delete" ? "DELETE" : "POST" });
+        ? withProject(`/api/connectors/${provider}/connections/${connection.id}`, projectId)
+        : withProject(`/api/connectors/${provider}/connections/${connection.id}/${action}`, projectId);
+      await mutateJson<ProviderConnection>(path, { method: action === "delete" ? "DELETE" : "POST" });
       await load();
     });
   }
@@ -116,15 +163,15 @@ export function ConnectorsView({ projectId, onError }: { projectId: string; onEr
     <section className="wide-view connectors-view">
       <div className="view-heading">
         <div>
-          <h1>GitHub Connector</h1>
-          <p>GitHub App installations synced through Prism Flows.</p>
+          <h1>Connectors</h1>
+          <p>Hosted issue sync through Prism Flows.</p>
         </div>
         <button className="icon-button" onClick={() => void load()} title="Refresh connectors"><PlugZap size={17} /></button>
       </div>
 
       <div className="connector-grid">
         <div className="connector-config">
-          <h2>Installation</h2>
+          <h2>GitHub Installation</h2>
           <div className="connector-form">
             <input value={draft.connectionId} onChange={(event) => setDraft({ ...draft, connectionId: event.target.value })} placeholder="connection id" />
             <input value={draft.appId} onChange={(event) => setDraft({ ...draft, appId: event.target.value })} placeholder="GitHub App ID" />
@@ -162,6 +209,49 @@ export function ConnectorsView({ projectId, onError }: { projectId: string; onEr
             </div>
           ))}
           {connections.length === 0 ? <p className="muted">{loading ? "Loading connector state..." : "No GitHub installations configured."}</p> : null}
+        </div>
+      </div>
+
+      <div className="connector-grid">
+        <div className="connector-config">
+          <h2>Jira Project</h2>
+          <div className="connector-form">
+            <input value={jiraDraft.connectionId} onChange={(event) => setJiraDraft({ ...jiraDraft, connectionId: event.target.value })} placeholder="connection id" />
+            <input value={jiraDraft.siteUrl} onChange={(event) => setJiraDraft({ ...jiraDraft, siteUrl: event.target.value })} placeholder="https://team.atlassian.net" />
+            <input value={jiraDraft.cloudId} onChange={(event) => setJiraDraft({ ...jiraDraft, cloudId: event.target.value })} placeholder="cloud id" />
+            <input value={jiraDraft.projectKey} onChange={(event) => setJiraDraft({ ...jiraDraft, projectKey: event.target.value })} placeholder="project key" />
+            <input value={jiraDraft.accountEmail} onChange={(event) => setJiraDraft({ ...jiraDraft, accountEmail: event.target.value })} placeholder="account email" />
+            <input value={jiraDraft.tokenSecretId} onChange={(event) => setJiraDraft({ ...jiraDraft, tokenSecretId: event.target.value })} placeholder="token secret id" />
+            <input value={jiraDraft.webhookSecretId} onChange={(event) => setJiraDraft({ ...jiraDraft, webhookSecretId: event.target.value })} placeholder="webhook secret id" />
+            <button disabled={loading || !jiraDraft.siteUrl || !jiraDraft.projectKey || !jiraDraft.tokenSecretId || !jiraDraft.webhookSecretId} onClick={() => void createJiraConnection()}>
+              <PlugZap size={16} /> Save Jira project
+            </button>
+          </div>
+        </div>
+
+        <div className="connector-list">
+          {jiraConnections.map((connection) => (
+            <div className="connector-row" key={connection.id}>
+              <div>
+                <h2>{connection.metadata.projectKey}</h2>
+                <p>{connection.id} · {connection.metadata.siteUrl}</p>
+                <div className="connector-meta">
+                  <span>{connection.status}</span>
+                  <span>{connection.metadata.syncPreset}</span>
+                  <span>{connection.metadata.scopes.length} scopes</span>
+                </div>
+              </div>
+              <div className="connector-actions">
+                {connection.status === "paused" ? (
+                  <button className="icon-button" onClick={() => void transition(connection, "resume")} title="Resume"><Play size={16} /></button>
+                ) : (
+                  <button className="icon-button" onClick={() => void transition(connection, "pause")} title="Pause"><Pause size={16} /></button>
+                )}
+                <button className="icon-button danger" onClick={() => void transition(connection, "delete")} title="Disconnect"><Trash2 size={16} /></button>
+              </div>
+            </div>
+          ))}
+          {jiraConnections.length === 0 ? <p className="muted">{loading ? "Loading connector state..." : "No Jira projects configured."}</p> : null}
         </div>
       </div>
 

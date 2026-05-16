@@ -280,6 +280,29 @@ export interface GitHubConnectionRecord {
   };
 }
 
+export interface JiraConnectionRecord {
+  projectId: string;
+  id: string;
+  provider: "jira";
+  displayName: string;
+  status: "active" | "paused" | "error" | "archived";
+  updatedAt: string;
+  lastSyncAt: string | null;
+  lastErrorAt: string | null;
+  metadata: {
+    authModel: "jira_cloud_oauth_or_api_token";
+    siteUrl: string;
+    cloudId: string | null;
+    projectKey: string;
+    accountEmail: string | null;
+    tokenSecretId: string;
+    webhookSecretId: string;
+    syncPreset: ConnectorSyncPreset;
+    fieldPolicies: Record<string, ConnectorFieldPolicy>;
+    scopes: string[];
+  };
+}
+
 export type ConnectorSyncPreset = "mirror_external_work" | "execution_layer" | "bidirectional_project_sync";
 export type ConnectorFieldSyncMode = "disabled" | "manual" | "inbound_only" | "outbound_only" | "bidirectional" | "append_only" | "unblock_owned" | "external_owned";
 export type ConnectorSyncQueueItemStatus = "pending" | "auto_applying" | "blocked" | "manual_review" | "ignored" | "resolved" | "failed";

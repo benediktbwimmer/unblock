@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   getJiraIssueMappingByExternal,
   jiraConnectorAuthModel,
+  jiraIssueFieldDiffs,
   jiraIssueExternalId,
+  planJiraIssueSyncQueue,
   upsertJiraConnection,
   upsertJiraIssueMapping,
 } from "./jira-connector.js";
@@ -76,7 +78,13 @@ describe("Jira connector scaffold", () => {
       taskId: "JIRA-ENG-42",
       issueType: "Story",
       statusName: "In Progress",
+      statusCategory: "indeterminate",
       assigneeAccountId: "abc123",
+      assigneeDisplayName: "Alice",
+      assigneeEmail: "alice@example.com",
+      labels: ["platform", "urgent"],
+      components: ["backend"],
+      requiredFields: { resolution: null },
       externalVersion: "updated-1",
       localVersion: "3",
     });
@@ -93,7 +101,11 @@ describe("Jira connector scaffold", () => {
         issueKey: "ENG-42",
         issueId: "10042",
         statusName: "In Progress",
+        statusCategory: "indeterminate",
         assigneeAccountId: "abc123",
+        labels: ["platform", "urgent"],
+        components: ["backend"],
+        requiredFields: { resolution: null },
       },
     });
     await expect(
@@ -102,6 +114,80 @@ describe("Jira connector scaffold", () => {
         issueKey: "ENG-42",
       }),
     ).resolves.toMatchObject({ localId: "JIRA-ENG-42" });
+  });
+
+  it("builds Jira issue field diffs for richer issue semantics", () => {
+    const diffs = jiraIssueFieldDiffs(
+      {
+        title: "External title",
+        description: "External description",
+        statusName: "In Progress",
+        assigneeAccountId: "abc123",
+        labels: ["platform", "urgent"],
+        components: ["backend"],
+        requiredFields: { resolution: null },
+      },
+      {
+        title: "Local title",
+        description: "External description",
+        externalState: "To Do",
+        responsibility: "principal-alice",
+        labels: ["urgent"],
+        components: [],
+      },
+    );
+
+    expect(diffs.map((diff) => diff.field)).toEqual([
+      "title",
+      "external_state",
+      "responsibility",
+      "labels",
+      "components",
+      "required_fields",
+    ]);
+    expect(diffs.find((diff) => diff.field === "required_fields"))
+      .toMatchObject({
+        reason: "Jira requires additional transition fields before outbound sync can apply.",
+      });
+  });
+
+  it("feeds Jira diffs through the connector policy queue planner", async () => {
+    const store = createMemoryStore() as any;
+    store.connectors = new FakeConnectors();
+    const mapping = await upsertJiraIssueMapping(store, {
+      projectId: "PROJECT",
+      connectionId: "jira-main",
+      siteUrl: "https://acme.atlassian.net",
+      projectKey: "ENG",
+      issueKey: "ENG-42",
+      issueUrl: "https://acme.atlassian.net/browse/ENG-42",
+      taskId: "JIRA-ENG-42",
+    });
+
+    const plan = planJiraIssueSyncQueue({
+      mapping,
+      external: {
+        title: "External title",
+        statusName: "In Progress",
+        labels: ["backend"],
+      },
+      local: {
+        title: "Local title",
+        externalState: "To Do",
+        labels: [],
+      },
+      autoApply: false,
+    });
+
+    expect(plan.items).toHaveLength(3);
+    expect(plan.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        connectionId: "jira-main",
+        externalKind: "issue",
+        localId: "JIRA-ENG-42",
+        decision: expect.objectContaining({ kind: "apply_inbound" }),
+      }),
+    ]));
   });
 });
 

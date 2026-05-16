@@ -23,8 +23,13 @@ import {
   hasHostedPermission,
   hostedPermissionForRequest,
   githubIssueMappingInputSchema,
+  jiraConnectionInputSchema,
+  jiraConnectorAuthModel,
+  jiraIssueMappingInputSchema,
   listGitHubConnections,
   listGitHubIssueMappings,
+  listJiraConnections,
+  listJiraIssueMappings,
   listConnectorSyncPolicies,
   listConnectorSyncQueueItems,
   matcherQueryGrammar,
@@ -38,6 +43,8 @@ import {
   UnblockError,
   upsertGitHubIssueMapping,
   upsertGitHubConnection,
+  upsertJiraConnection,
+  upsertJiraIssueMapping,
   updateConnectorSyncQueueItemStatus,
   upsertConnectorSyncPolicy,
   publicUnblockConfig,
@@ -664,6 +671,127 @@ export function createApp(options: ServerOptions = {}) {
     for (const mapping of mappings) {
       await authorizeHosted(c, mapping.projectId);
       results.push(await upsertGitHubIssueMapping(c.get("store"), mapping));
+    }
+    return c.json({ count: results.length, results }, 201);
+  });
+
+  app.get("/api/connectors/jira/auth-model", async (c) => {
+    await requireHosted(c);
+    await authorizeHosted(c, null);
+    const publicBaseUrl = connectorPublicIngressUrl();
+    return c.json({
+      ...jiraConnectorAuthModel,
+      webhook: {
+        url: publicBaseUrl ? `${publicBaseUrl}/webhooks/jira/issues` : null,
+        secretPurpose: "jira.webhook_secret",
+        events: ["jira:issue_created", "jira:issue_updated", "jira:issue_deleted"]
+      }
+    });
+  });
+
+  app.get("/api/connectors/jira/setup", async (c) => {
+    await requireHosted(c);
+    const projectId = c.req.query("projectId")?.trim() ?? null;
+    await authorizeHosted(c, projectId);
+    const publicBaseUrl = connectorPublicIngressUrl();
+    return c.json({
+      provider: "jira",
+      projectId,
+      authModel: jiraConnectorAuthModel.mode,
+      scopes: jiraConnectorAuthModel.scopes,
+      requiredSecrets: [
+        { name: "jira-token", purpose: "jira.token" },
+        { name: "jira-webhook-secret", purpose: "jira.webhook_secret" }
+      ],
+      webhookUrl: publicBaseUrl ? `${publicBaseUrl}/webhooks/jira/issues` : null,
+      connectionEndpoint: "/api/connectors/jira/connections"
+    });
+  });
+
+  app.get("/api/connectors/jira/connections", async (c) => {
+    await requireHosted(c);
+    const projectId = c.req.query("projectId")?.trim();
+    await authorizeHosted(c, projectId ?? null);
+    const connections = await listJiraConnections(c.get("store"), projectId);
+    if (c.req.query("includeState") !== "true") return c.json(connections);
+    const connectors = c.get("store").connectors;
+    if (!connectors) return c.json(connections);
+    return c.json(await Promise.all(connections.map(async (connection) => ({
+      ...connection,
+      cursors: await connectors.listCursors(connection.projectId, connection.id),
+      recentRuns: await connectors.listSyncRuns({
+        projectId: connection.projectId,
+        connectionId: connection.id,
+        limit: parseOptionalInteger(c.req.query("runLimit")) ?? 10
+      })
+    }))));
+  });
+
+  app.post("/api/connectors/jira/connections", async (c) => {
+    await requireHosted(c);
+    const body = jiraConnectionInputSchema.parse(await c.req.json());
+    await authorizeHosted(c, body.projectId);
+    return c.json(await upsertJiraConnection(c.get("store"), body), 201);
+  });
+
+  app.post("/api/connectors/jira/connections/:id/pause", async (c) => {
+    await requireHosted(c);
+    const projectId = requireProjectId(c);
+    await authorizeHosted(c, projectId);
+    return c.json(await setConnectorConnectionStatus(c.get("store"), {
+      projectId,
+      connectionId: c.req.param("id"),
+      status: "paused"
+    }));
+  });
+
+  app.post("/api/connectors/jira/connections/:id/resume", async (c) => {
+    await requireHosted(c);
+    const projectId = requireProjectId(c);
+    await authorizeHosted(c, projectId);
+    return c.json(await setConnectorConnectionStatus(c.get("store"), {
+      projectId,
+      connectionId: c.req.param("id"),
+      status: "active"
+    }));
+  });
+
+  app.delete("/api/connectors/jira/connections/:id", async (c) => {
+    await requireHosted(c);
+    const projectId = requireProjectId(c);
+    await authorizeHosted(c, projectId);
+    return c.json(await setConnectorConnectionStatus(c.get("store"), {
+      projectId,
+      connectionId: c.req.param("id"),
+      status: "archived"
+    }));
+  });
+
+  app.get("/api/connectors/jira/mappings", async (c) => {
+    await requireHosted(c);
+    const projectId = c.req.query("projectId")?.trim();
+    await authorizeHosted(c, projectId ?? null);
+    return c.json(await listJiraIssueMappings(c.get("store"), {
+      projectId,
+      connectionId: c.req.query("connectionId")?.trim(),
+      limit: parseOptionalInteger(c.req.query("limit")) ?? 100
+    }));
+  });
+
+  app.post("/api/connectors/jira/mappings", async (c) => {
+    await requireHosted(c);
+    const body = jiraIssueMappingInputSchema.parse(await c.req.json());
+    await authorizeHosted(c, body.projectId);
+    return c.json(await upsertJiraIssueMapping(c.get("store"), body), 201);
+  });
+
+  app.post("/api/connectors/jira/mappings/batch", async (c) => {
+    await requireHosted(c);
+    const mappings = jiraIssueMappingInputSchema.array().parse(await c.req.json());
+    const results = [];
+    for (const mapping of mappings) {
+      await authorizeHosted(c, mapping.projectId);
+      results.push(await upsertJiraIssueMapping(c.get("store"), mapping));
     }
     return c.json({ count: results.length, results }, 201);
   });

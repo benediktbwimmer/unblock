@@ -1,8 +1,12 @@
 import { z } from "zod";
 import {
   connectorFieldPolicyRecordSchema,
+  planConnectorSyncQueue,
+  resolveConnectorSyncPolicy,
   connectorSyncPolicyPreset,
   connectorSyncPresetSchema,
+  type ConnectorSyncPolicyResolutionInput,
+  type ConnectorSyncQueuePlan,
 } from "./connector-sync.js";
 import { upsertConnectorConnection } from "./connector-reconciliation.js";
 import { validation } from "./errors.js";
@@ -11,6 +15,11 @@ import {
   nowIso,
   type ConnectorConnection,
   type ConnectorExternalMapping,
+  type ConnectorFieldDiff,
+  type ConnectorSyncPolicyRecord,
+  type ConnectorSyncPreset,
+  type Dependency,
+  type TaskView,
 } from "./types.js";
 
 export const jiraConnectorAuthModel = {
@@ -70,7 +79,13 @@ export const jiraIssueMappingInputSchema = z.object({
   taskId: z.string().min(1),
   issueType: z.string().min(1).nullable().optional(),
   statusName: z.string().min(1).nullable().optional(),
+  statusCategory: z.string().min(1).nullable().optional(),
   assigneeAccountId: z.string().min(1).nullable().optional(),
+  assigneeDisplayName: z.string().min(1).nullable().optional(),
+  assigneeEmail: z.string().email().nullable().optional(),
+  labels: z.array(z.string().min(1)).default([]),
+  components: z.array(z.string().min(1)).default([]),
+  requiredFields: z.record(z.string(), z.unknown()).default({}),
   externalVersion: z.string().min(1).nullable().optional(),
   localVersion: z.string().min(1).nullable().optional(),
   status: z.enum(["active", "conflict", "operator_review", "archived"]).default(
@@ -97,9 +112,50 @@ export interface JiraIssueMapping extends ConnectorExternalMapping {
     issueId: string | null;
     issueType: string | null;
     statusName: string | null;
+    statusCategory: string | null;
     assigneeAccountId: string | null;
+    assigneeDisplayName: string | null;
+    assigneeEmail: string | null;
+    labels: string[];
+    components: string[];
+    requiredFields: Record<string, unknown>;
     [key: string]: unknown;
   };
+}
+
+export interface JiraIssueExternalSnapshot {
+  title?: string | undefined;
+  description?: string | undefined;
+  statusName?: string | null | undefined;
+  statusCategory?: string | null | undefined;
+  assigneeAccountId?: string | null | undefined;
+  labels?: string[] | undefined;
+  components?: string[] | undefined;
+  requiredFields?: Record<string, unknown> | undefined;
+  updatedAt?: string | null | undefined;
+}
+
+export interface JiraIssueLocalSnapshot {
+  title?: string | undefined;
+  description?: string | undefined;
+  externalState?: string | null | undefined;
+  responsibility?: string | null | undefined;
+  labels?: string[] | undefined;
+  components?: string[] | undefined;
+  updatedAt?: string | null | undefined;
+}
+
+export interface JiraIssueSyncQueuePlanInput {
+  mapping: JiraIssueMapping;
+  external: JiraIssueExternalSnapshot;
+  local: JiraIssueLocalSnapshot;
+  preset?: ConnectorSyncPreset | undefined;
+  policies?: ConnectorSyncPolicyRecord[] | undefined;
+  task?: TaskView | undefined;
+  tasks?: TaskView[] | undefined;
+  dependencies?: Dependency[] | undefined;
+  now?: string | undefined;
+  autoApply?: boolean | undefined;
 }
 
 export async function upsertJiraConnection(
@@ -195,11 +251,121 @@ export async function upsertJiraIssueMapping(
       issueId: parsed.issueId ?? null,
       issueType: parsed.issueType ?? null,
       statusName: parsed.statusName ?? null,
+      statusCategory: parsed.statusCategory ?? null,
       assigneeAccountId: parsed.assigneeAccountId ?? null,
+      assigneeDisplayName: parsed.assigneeDisplayName ?? null,
+      assigneeEmail: parsed.assigneeEmail ?? null,
+      labels: normalizedStringList(parsed.labels),
+      components: normalizedStringList(parsed.components),
+      requiredFields: parsed.requiredFields,
     },
   };
   await repo.upsertMapping(mapping);
   return mapping;
+}
+
+export async function listJiraConnections(
+  store: AppStore,
+  projectId?: string | undefined,
+): Promise<JiraConnectorConnection[]> {
+  const connections = await (store.connectors?.listConnections(projectId) ?? []);
+  return connections
+    .filter((connection) => connection.provider === "jira")
+    .map(parseJiraConnection);
+}
+
+export async function listJiraIssueMappings(
+  store: AppStore,
+  options: {
+    projectId?: string | undefined;
+    connectionId?: string | undefined;
+    limit?: number | undefined;
+  } = {},
+): Promise<JiraIssueMapping[]> {
+  const repo = requireMappingRepository(store);
+  const mappings = await repo.listMappings({
+    ...options,
+    provider: "jira",
+  });
+  return mappings
+    .filter((mapping) => mapping.externalKind === "issue" && mapping.localKind === "task")
+    .map(parseJiraIssueMapping);
+}
+
+export function planJiraIssueSyncQueue(
+  input: JiraIssueSyncQueuePlanInput,
+): ConnectorSyncQueuePlan {
+  const resolutionInput: ConnectorSyncPolicyResolutionInput = {
+    provider: "jira",
+    objectKind: "issue",
+    preset: input.preset,
+    policies: input.policies,
+    task: input.task,
+    tasks: input.tasks,
+    dependencies: input.dependencies,
+  };
+  const resolution = resolveConnectorSyncPolicy(resolutionInput);
+  return planConnectorSyncQueue({
+    resolution,
+    mapping: input.mapping,
+    diffs: jiraIssueFieldDiffs(input.external, input.local),
+    externalSnapshot: {
+      ...input.external,
+      provider: "jira",
+      issueKey: input.mapping.metadata.issueKey,
+    },
+    localSnapshot: input.local as Record<string, unknown>,
+    now: input.now,
+    autoApply: input.autoApply,
+  });
+}
+
+export function jiraIssueFieldDiffs(
+  external: JiraIssueExternalSnapshot,
+  local: JiraIssueLocalSnapshot,
+): ConnectorFieldDiff[] {
+  const diffs: ConnectorFieldDiff[] = [];
+  pushDiff(diffs, "title", external.title, local.title, external.updatedAt, local.updatedAt);
+  pushDiff(diffs, "description", external.description, local.description, external.updatedAt, local.updatedAt);
+  pushDiff(diffs, "external_state", external.statusName ?? null, local.externalState ?? null, external.updatedAt, local.updatedAt);
+  pushDiff(
+    diffs,
+    "responsibility",
+    external.assigneeAccountId ?? null,
+    local.responsibility ?? null,
+    external.updatedAt,
+    local.updatedAt,
+  );
+  pushDiff(
+    diffs,
+    "labels",
+    normalizedStringList(external.labels ?? []),
+    normalizedStringList(local.labels ?? []),
+    external.updatedAt,
+    local.updatedAt,
+  );
+  pushDiff(
+    diffs,
+    "components",
+    normalizedStringList(external.components ?? []),
+    normalizedStringList(local.components ?? []),
+    external.updatedAt,
+    local.updatedAt,
+  );
+  const missingRequiredFields = Object.entries(external.requiredFields ?? {})
+    .filter(([, value]) => value === null || value === undefined || value === "")
+    .map(([fieldName]) => fieldName);
+  if (missingRequiredFields.length > 0) {
+    diffs.push({
+      field: "required_fields",
+      externalValue: external.requiredFields ?? {},
+      localValue: { missing: missingRequiredFields },
+      externalUpdatedAt: external.updatedAt ?? null,
+      localUpdatedAt: local.updatedAt ?? null,
+      reason: "Jira requires additional transition fields before outbound sync can apply.",
+    });
+  }
+  return diffs;
 }
 
 export function jiraIssueExternalId(input: { projectKey: string; issueKey: string }): string {
@@ -242,6 +408,37 @@ export async function getJiraIssueMappingByExternal(
     jiraIssueExternalId(input),
   );
   return mapping ? parseJiraIssueMapping(mapping) : null;
+}
+
+function pushDiff(
+  diffs: ConnectorFieldDiff[],
+  fieldName: string,
+  externalValue: unknown,
+  localValue: unknown,
+  externalUpdatedAt?: string | null | undefined,
+  localUpdatedAt?: string | null | undefined,
+): void {
+  if (normalizedComparable(externalValue) === normalizedComparable(localValue)) {
+    return;
+  }
+  diffs.push({
+    field: fieldName,
+    externalValue,
+    localValue,
+    externalUpdatedAt,
+    localUpdatedAt,
+  });
+}
+
+function normalizedComparable(value: unknown): string {
+  if (Array.isArray(value)) return JSON.stringify(normalizedStringList(value));
+  return JSON.stringify(value ?? null);
+}
+
+function normalizedStringList(values: readonly unknown[]): string[] {
+  return [...new Set(values
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .map((value) => value.trim()))].sort((left, right) => left.localeCompare(right));
 }
 
 async function ensureSecretExists(
