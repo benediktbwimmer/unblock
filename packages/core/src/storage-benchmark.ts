@@ -8,6 +8,12 @@ import {
   connectorSyncPolicyPreset,
   createConnectorSyncPolicyRecord,
 } from "./connector-sync.js";
+import {
+  createDelegationRuleRecord,
+  createExternalIdentityRecord,
+  createPrincipalRecord,
+  createTaskResponsibilityRecord,
+} from "./responsibility-mapping.js";
 import type {
   AddTaskInput,
   ConnectorExternalMapping,
@@ -322,6 +328,7 @@ export async function runConnectorWorkloadBenchmark(store: AppStore, options: Co
   const projectId = normalizeProjectId(options.projectId ?? `CONNECTOR-BENCH-${Date.now().toString(36)}`);
   const tenantId = options.tenantId?.trim() || "benchmark-tenant";
   const connectionId = options.connectionId?.trim() || "github-main";
+  const jiraConnectionId = `${connectionId}-jira`;
   const machine = options.machine?.trim() || "connector-benchmark";
   const actor = options.actor?.trim() || "connector-benchmark";
   const taskCount = positiveInteger(options.tasks, 1000);
@@ -372,13 +379,20 @@ export async function runConnectorWorkloadBenchmark(store: AppStore, options: Co
   });
 
   const services = createServices(store, { projectId, machine, actor });
-  await measure(phases, "connection.upsert", 1, async () => {
+  await measure(phases, "connection.upsert", 2, async () => {
     await upsertConnectorConnection(store, {
       projectId,
       connectionId,
       provider: "github",
       displayName: "GitHub benchmark",
       metadata: { repositoryOwner: "benchmark", repositoryName: "unblock" }
+    });
+    await upsertConnectorConnection(store, {
+      projectId,
+      connectionId: jiraConnectionId,
+      provider: "jira",
+      displayName: "Jira benchmark",
+      metadata: { siteUrl: "https://benchmark.atlassian.net", projectKey: "BENCH" }
     });
   });
 
@@ -398,26 +412,79 @@ export async function runConnectorWorkloadBenchmark(store: AppStore, options: Co
   });
 
   const now = nowIso();
-  const mappings = Array.from({ length: mappingCount }, (_item, index) =>
-    connectorMapping(projectId, connectionId, index, now)
-  );
+  const mappings = Array.from({ length: mappingCount }, (_item, index) => {
+    const provider = connectorBenchmarkProvider(index);
+    return connectorMapping(projectId, provider === "jira" ? jiraConnectionId : connectionId, index, now, provider);
+  });
   await measure(phases, "mappings.upsert", mappings.length, async () => {
     for (const mapping of mappings) {
       await connectors.upsertMapping!(mapping);
     }
   });
 
+  if (store.responsibilities) {
+    const principals = Array.from({ length: Math.min(100, taskCount) }, (_item, index) =>
+      createPrincipalRecord({
+        tenantId,
+        id: `principal-${index}`,
+        kind: index % 10 === 0 ? "bot" : "user",
+        displayName: `Principal ${index}`,
+        email: `principal-${index}@benchmark.test`,
+      }, now)
+    );
+    await measure(phases, "responsibility.identity_upsert", mappings.length + principals.length, async () => {
+      for (const principal of principals) {
+        await store.responsibilities!.upsertPrincipal(principal);
+      }
+      for (const mapping of mappings) {
+        const principal = principals[indexFromTaskId(mapping.localId) % principals.length]!;
+        await store.responsibilities!.upsertExternalIdentity(createExternalIdentityRecord({
+          tenantId,
+          connectionId: mapping.connectionId,
+          provider: mapping.provider,
+          externalKind: "user",
+          externalId: `${mapping.provider}-user-${indexFromTaskId(mapping.localId) % principals.length}`,
+          externalDisplayName: principal.displayName,
+          externalEmail: principal.email,
+          principalId: principal.id,
+          confidence: "verified",
+        }, now));
+        await store.responsibilities!.upsertTaskResponsibility(createTaskResponsibilityRecord({
+          tenantId,
+          projectId,
+          taskId: mapping.localId,
+          principalId: principal.id,
+          role: "owner",
+          source: "connector",
+        }, now));
+      }
+      for (const principal of principals.slice(0, Math.min(10, principals.length))) {
+        await store.responsibilities!.upsertDelegationRule(createDelegationRuleRecord({
+          tenantId,
+          projectId,
+          id: `delegate-${principal.id}`,
+          principalId: principal.id,
+          targetKind: "track",
+          targetId: indexFromTaskId(principal.id) % 2 === 0 ? "codex-e" : "codex-b",
+          priority: 1,
+          enabled: true,
+        }, now));
+      }
+    });
+  }
+
   const basePolicy = connectorSyncPolicyPreset("github", "execution_layer", "issue");
+  const jiraPolicy = connectorSyncPolicyPreset("jira", "execution_layer", "issue");
   const policies = Array.from({ length: policyCount }, (_item, index) =>
     createConnectorSyncPolicyRecord({
       projectId,
       id: `POLICY-${index.toString().padStart(3, "0")}`,
-      connectionId,
+      connectionId: index % 2 === 0 ? connectionId : jiraConnectionId,
       name: `Connector benchmark policy ${index}`,
       scopeQuery: index === 0 ? null : `source section = issue-${index + 1}`,
       priority: policyCount - index,
       enabled: true,
-      policy: basePolicy
+      policy: index % 2 === 0 ? basePolicy : jiraPolicy
     }, now)
   );
   await measure(phases, "sync_policies.upsert", policies.length, async () => {
@@ -430,9 +497,10 @@ export async function runConnectorWorkloadBenchmark(store: AppStore, options: Co
     connectorIssueEvent({
       tenantId,
       projectId,
-      connectionId,
+      connectionId: connectorBenchmarkProvider(index) === "jira" ? jiraConnectionId : connectionId,
       index,
       kind: "connector.inbound.external_changed",
+      provider: connectorBenchmarkProvider(index),
       occurredAt: now
     })
   );
@@ -455,9 +523,10 @@ export async function runConnectorWorkloadBenchmark(store: AppStore, options: Co
     connectorIssueEvent({
       tenantId,
       projectId,
-      connectionId,
+      connectionId: connectorBenchmarkProvider(index) === "jira" ? jiraConnectionId : connectionId,
       index,
       kind: "connector.outbound.local_changed",
+      provider: connectorBenchmarkProvider(index),
       occurredAt: now
     })
   );
@@ -466,7 +535,7 @@ export async function runConnectorWorkloadBenchmark(store: AppStore, options: Co
       await outbox.enqueue(outboxEventForConnector(event, {
         projectId,
         subjectType: "task",
-        subjectId: taskId(indexFromExternalId(event.external?.id ?? "1")),
+        subjectId: event.local?.id ?? taskId(indexFromExternalId(event.external?.id ?? "1")),
         availableAt: now
       }));
     }
@@ -490,8 +559,8 @@ export async function runConnectorWorkloadBenchmark(store: AppStore, options: Co
       await requestConnectorReconciliation(store, {
         tenantId,
         projectId,
-        connectionId,
-        provider: "github",
+        connectionId: index % 2 === 0 ? connectionId : jiraConnectionId,
+        provider: index % 2 === 0 ? "github" : "jira",
         reason: `benchmark-${index}`,
         runId: randomUUID(),
         now
@@ -500,15 +569,18 @@ export async function runConnectorWorkloadBenchmark(store: AppStore, options: Co
   });
 
   const queueItems = Array.from({ length: queueItemCount }, (_item, index) => {
-    const mapping = mappings[index % Math.max(1, mappings.length)] ?? connectorMapping(projectId, connectionId, index, now);
+    const provider = connectorBenchmarkProvider(index);
+    const mapping = mappings[index % Math.max(1, mappings.length)] ??
+      connectorMapping(projectId, provider === "jira" ? jiraConnectionId : connectionId, index, now, provider);
+    const policy = mapping.provider === "jira" ? jiraPolicy : basePolicy;
     return buildConnectorSyncQueueItem({
-      policy: basePolicy,
+      policy,
       policyId: policies[index % Math.max(1, policies.length)]?.id ?? null,
       scopeQuery: policies[index % Math.max(1, policies.length)]?.scopeQuery ?? null,
       mapping,
       now,
       diff: {
-        field: index % 3 === 0 ? "title" : index % 3 === 1 ? "description" : "labels",
+        field: index % 4 === 0 ? "title" : index % 4 === 1 ? "description" : index % 4 === 2 ? "labels" : "components",
         externalValue: `external-${index}`,
         localValue: `local-${index}`,
         externalVersion: `e-${index}`,
@@ -517,7 +589,7 @@ export async function runConnectorWorkloadBenchmark(store: AppStore, options: Co
         localUpdatedAt: now,
         reason: "benchmark divergence"
       },
-      externalSnapshot: { title: `External issue ${index}`, number: index + 1 },
+      externalSnapshot: { title: `External issue ${index}`, number: index + 1, provider: mapping.provider },
       localSnapshot: { title: `Connector benchmark task ${index}` }
     });
   });
@@ -539,11 +611,11 @@ export async function runConnectorWorkloadBenchmark(store: AppStore, options: Co
     for (let index = 0; index < readCount; index += 1) {
       await Promise.all([
         connectors.listConnections(projectId),
-        connectors.listCursors(projectId, connectionId),
-        connectors.listSyncRuns({ projectId, connectionId, limit: 20 }),
-        connectors.listMappings!({ projectId, connectionId, limit: 100 }),
-        connectors.listSyncPolicies!({ projectId, connectionId, limit: 20 }),
-        connectors.listSyncQueueItems!({ projectId, connectionId, status: index % 2 === 0 ? "pending" : "resolved", limit: 100 })
+        connectors.listCursors(projectId, index % 2 === 0 ? connectionId : jiraConnectionId),
+        connectors.listSyncRuns({ projectId, connectionId: index % 2 === 0 ? connectionId : jiraConnectionId, limit: 20 }),
+        connectors.listMappings!({ projectId, provider: index % 2 === 0 ? "github" : "jira", limit: 100 }),
+        connectors.listSyncPolicies!({ projectId, connectionId: index % 2 === 0 ? connectionId : jiraConnectionId, limit: 20 }),
+        connectors.listSyncQueueItems!({ projectId, connectionId: index % 2 === 0 ? connectionId : jiraConnectionId, status: index % 2 === 0 ? "pending" : "resolved", limit: 100 })
       ]);
     }
   });
@@ -742,14 +814,18 @@ function connectorMapping(
   connectionId: string,
   index: number,
   now: string,
+  provider: "github" | "jira" = "github",
 ): ConnectorExternalMapping {
+  const issueId = provider === "jira" ? `BENCH-${index + 1}` : String(index + 1);
   return {
     projectId,
     connectionId,
-    provider: "github",
+    provider,
     externalKind: "issue",
-    externalId: String(index + 1),
-    externalUrl: `https://github.example.test/benchmark/unblock/issues/${index + 1}`,
+    externalId: issueId,
+    externalUrl: provider === "jira"
+      ? `https://benchmark.atlassian.net/browse/${issueId}`
+      : `https://github.example.test/benchmark/unblock/issues/${index + 1}`,
     externalVersion: `external-${index}`,
     localKind: "task",
     localId: taskId(index),
@@ -760,7 +836,16 @@ function connectorMapping(
     createdAt: now,
     updatedAt: now,
     archivedAt: null,
-    metadata: { source: "connector-benchmark" }
+    metadata: provider === "jira"
+      ? {
+        source: "connector-benchmark",
+        projectKey: "BENCH",
+        issueKey: issueId,
+        statusName: index % 3 === 0 ? "To Do" : "In Progress",
+        labels: [`area-${index % 5}`],
+        components: [`component-${index % 3}`],
+      }
+      : { source: "connector-benchmark" }
   };
 }
 
@@ -769,24 +854,30 @@ function connectorIssueEvent(input: {
   projectId: string;
   connectionId: string;
   index: number;
+  provider?: "github" | "jira" | undefined;
   kind: "connector.inbound.external_changed" | "connector.outbound.local_changed";
   occurredAt: string;
 }) {
   const issueNumber = input.index + 1;
+  const provider = input.provider ?? "github";
+  const externalId = provider === "jira" ? `BENCH-${issueNumber}` : String(issueNumber);
+  const externalUrl = provider === "jira"
+    ? `https://benchmark.atlassian.net/browse/${externalId}`
+    : `https://github.example.test/benchmark/unblock/issues/${issueNumber}`;
   return connectorEvent({
     kind: input.kind,
     scope: {
       tenantId: input.tenantId,
       projectId: input.projectId,
       connectionId: input.connectionId,
-      provider: "github",
+      provider,
     },
     local: { kind: "task", id: taskId(input.index) },
     external: {
-      system: "github",
+      system: provider,
       kind: "issue",
-      id: String(issueNumber),
-      url: `https://github.example.test/benchmark/unblock/issues/${issueNumber}`,
+      id: externalId,
+      url: externalUrl,
     },
     task: {
       id: taskId(input.index),
@@ -794,16 +885,25 @@ function connectorIssueEvent(input: {
       description: `Synthetic connector benchmark issue ${issueNumber}.`,
       lifecycle: "open",
       priority: (input.index % 5) as 0 | 1 | 2 | 3 | 4,
-      sourceUrl: `https://github.example.test/benchmark/unblock/issues/${issueNumber}`,
+      sourceUrl: externalUrl,
     },
-    evidence: { benchmark: true, issueNumber },
+    evidence: { benchmark: true, issueNumber, provider },
     occurredAt: input.occurredAt,
   });
+}
+
+function connectorBenchmarkProvider(index: number): "github" | "jira" {
+  return index % 2 === 0 ? "github" : "jira";
 }
 
 function indexFromExternalId(value: string): number {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed - 1 : 0;
+}
+
+function indexFromTaskId(value: string): number {
+  const parsed = Number.parseInt(value.replace(/^\D+/, ""), 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 }
 
 async function measureRead(phases: MatcherReadBenchmarkPhase[], name: string, iterations: number, fn: () => Promise<number>, operationsPerIteration = 1): Promise<void> {
