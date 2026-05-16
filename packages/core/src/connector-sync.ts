@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { validation } from "./errors.js";
 import { matchMatcherQuery } from "./matcher-query.js";
@@ -143,6 +143,29 @@ export interface ConnectorSyncPolicyResolutionInput {
   dependencies?: Dependency[] | undefined;
 }
 
+export interface ConnectorSyncQueuePlanInput {
+  resolution: ConnectorSyncPolicyResolution;
+  diffs: ConnectorFieldDiff[];
+  mapping?: ConnectorExternalMapping | null | undefined;
+  externalSnapshot?: Record<string, unknown> | undefined;
+  localSnapshot?: Record<string, unknown> | undefined;
+  now?: string | undefined;
+  autoApply?:
+    | boolean
+    | ((decision: ConnectorSyncDecision) => boolean)
+    | undefined;
+}
+
+export interface ConnectorSyncQueuePlan {
+  items: ConnectorSyncQueueItem[];
+  autoApplyItems: ConnectorSyncQueueItem[];
+  pendingItems: ConnectorSyncQueueItem[];
+  manualReviewItems: ConnectorSyncQueueItem[];
+  blockedItems: ConnectorSyncQueueItem[];
+  resolvedItems: ConnectorSyncQueueItem[];
+  ignoredItems: ConnectorSyncQueueItem[];
+}
+
 export function createConnectorSyncPolicyRecord(
   input: ConnectorSyncPolicyRecordInput,
   now = nowIso(),
@@ -234,6 +257,17 @@ export async function updateConnectorSyncQueueItemStatus(
     });
   }
   return item;
+}
+
+export async function upsertConnectorSyncQueueItems(
+  store: AppStore,
+  items: ConnectorSyncQueueItem[],
+): Promise<ConnectorSyncQueueItem[]> {
+  const connectors = requireConnectorSyncQueueRepository(store.connectors);
+  for (const item of items) {
+    await connectors.upsertSyncQueueItem(item);
+  }
+  return items;
 }
 
 export function connectorSyncPolicyPreset(
@@ -396,6 +430,92 @@ export function decideResolvedConnectorFieldSync(
   };
 }
 
+export function planConnectorSyncQueue(
+  input: ConnectorSyncQueuePlanInput,
+): ConnectorSyncQueuePlan {
+  const items = input.diffs.map((diff) => {
+    const decisionValue = decideResolvedConnectorFieldSync({
+      resolution: input.resolution,
+      diff,
+      mapping: input.mapping,
+      externalSnapshot: input.externalSnapshot,
+      localSnapshot: input.localSnapshot,
+      now: input.now,
+    });
+    const source = input.resolution.fieldSources[diff.field] ?? null;
+    const autoApply = typeof input.autoApply === "function"
+      ? input.autoApply(decisionValue)
+      : input.autoApply === true;
+    return buildConnectorSyncQueueItemFromDecision({
+      decision: decisionValue,
+      policy: input.resolution.policy,
+      policyId: source?.id ?? null,
+      scopeQuery: source?.scopeQuery ?? null,
+      mapping: input.mapping,
+      externalSnapshot: input.externalSnapshot,
+      localSnapshot: input.localSnapshot,
+      now: input.now,
+      autoApply,
+    });
+  });
+  return {
+    items,
+    autoApplyItems: items.filter((item) => item.status === "auto_applying"),
+    pendingItems: items.filter((item) => item.status === "pending"),
+    manualReviewItems: items.filter((item) => item.status === "manual_review"),
+    blockedItems: items.filter((item) => item.status === "blocked"),
+    resolvedItems: items.filter((item) => item.status === "resolved"),
+    ignoredItems: items.filter((item) => item.status === "ignored"),
+  };
+}
+
+export function buildConnectorSyncQueueItemFromDecision(
+  input: Omit<ConnectorSyncDecisionInput, "diff"> & {
+    decision: ConnectorSyncDecision;
+    policy: ConnectorSyncPolicy;
+    autoApply?: boolean | undefined;
+  },
+): ConnectorSyncQueueItem {
+  const mapping = input.mapping ?? null;
+  const status = queueStatusForDecision(input.decision, input.autoApply === true);
+  const now = input.now ?? nowIso();
+  return {
+    projectId: mapping?.projectId ?? "unknown",
+    id: connectorSyncQueueItemId({
+      mapping,
+      decision: input.decision,
+      policyId: input.policyId,
+      scopeQuery: input.scopeQuery,
+    }),
+    connectionId: mapping?.connectionId ?? "unknown",
+    mappingId: mapping
+      ? `${mapping.provider}:${mapping.externalKind}:${mapping.externalId}`
+      : null,
+    externalKind: mapping?.externalKind ?? input.policy.objectKind,
+    externalId: mapping?.externalId ?? "unknown",
+    localKind: mapping?.localKind ?? "task",
+    localId: mapping?.localId ?? "unknown",
+    status,
+    severity: status === "blocked" || status === "failed" ? "error" : status === "manual_review" ? "warning" : "info",
+    detectedAt: now,
+    resolvedAt: status === "ignored" || status === "resolved" ? now : null,
+    decision: input.decision,
+    externalSnapshot: input.externalSnapshot ?? {},
+    localSnapshot: input.localSnapshot ?? {},
+    diff: input.decision.diff ?? {
+      field: input.decision.field,
+      externalValue: undefined,
+      localValue: undefined,
+    },
+    policyRef: {
+      preset: input.policy.preset,
+      policyId: input.policyId ?? null,
+      scopeQuery: input.scopeQuery ?? null,
+    },
+    error: null,
+  };
+}
+
 export function connectorFieldPolicy(
   policy: ConnectorSyncPolicy,
   fieldName: string,
@@ -432,34 +552,10 @@ export function buildConnectorSyncQueueItem(
   input: ConnectorSyncDecisionInput,
 ): ConnectorSyncQueueItem {
   const decision = decideConnectorFieldSync(input);
-  const mapping = input.mapping ?? null;
-  const status = queueStatusForDecision(decision);
-  return {
-    projectId: mapping?.projectId ?? "unknown",
-    id: randomUUID(),
-    connectionId: mapping?.connectionId ?? "unknown",
-    mappingId: mapping
-      ? `${mapping.provider}:${mapping.externalKind}:${mapping.externalId}`
-      : null,
-    externalKind: mapping?.externalKind ?? input.policy.objectKind,
-    externalId: mapping?.externalId ?? "unknown",
-    localKind: mapping?.localKind ?? "task",
-    localId: mapping?.localId ?? "unknown",
-    status,
-    severity: status === "blocked" || status === "failed" ? "error" : status === "manual_review" ? "warning" : "info",
-    detectedAt: input.now ?? nowIso(),
-    resolvedAt: status === "ignored" || status === "resolved" ? (input.now ?? nowIso()) : null,
+  return buildConnectorSyncQueueItemFromDecision({
+    ...input,
     decision,
-    externalSnapshot: input.externalSnapshot ?? {},
-    localSnapshot: input.localSnapshot ?? {},
-    diff: input.diff,
-    policyRef: {
-      preset: input.policy.preset,
-      policyId: input.policyId ?? null,
-      scopeQuery: input.scopeQuery ?? null,
-    },
-    error: null,
-  };
+  });
 }
 
 function decideBidirectional(
@@ -549,11 +645,12 @@ function policySkipReasonText(
 
 function queueStatusForDecision(
   decisionValue: ConnectorSyncDecision,
+  autoApply = false,
 ): ConnectorSyncQueueItem["status"] {
   switch (decisionValue.kind) {
     case "apply_inbound":
     case "apply_outbound":
-      return "pending";
+      return autoApply ? "auto_applying" : "pending";
     case "blocked":
       return "blocked";
     case "manual_review":
@@ -564,6 +661,35 @@ function queueStatusForDecision(
       return "resolved";
   }
 }
+
+function connectorSyncQueueItemId(input: {
+  mapping: ConnectorExternalMapping | null;
+  decision: ConnectorSyncDecision;
+  policyId?: string | null | undefined;
+  scopeQuery?: string | null | undefined;
+}): string {
+  const diff = input.decision.diff;
+  const identity = {
+    connectionId: input.mapping?.connectionId ?? "unknown",
+    externalKind: input.mapping?.externalKind ?? "unknown",
+    externalId: input.mapping?.externalId ?? "unknown",
+    localKind: input.mapping?.localKind ?? "task",
+    localId: input.mapping?.localId ?? "unknown",
+    field: input.decision.field,
+    externalVersion: diff?.externalVersion ?? null,
+    localVersion: diff?.localVersion ?? null,
+    externalUpdatedAt: diff?.externalUpdatedAt ?? null,
+    localUpdatedAt: diff?.localUpdatedAt ?? null,
+    policyId: input.policyId ?? null,
+    scopeQuery: input.scopeQuery ?? null,
+  };
+  const digest = createHash("sha256")
+    .update(JSON.stringify(identity))
+    .digest("hex")
+    .slice(0, 24);
+  return `syncq_${digest}`;
+}
+
 
 function field(
   fieldName: string,
@@ -625,10 +751,10 @@ function requireConnectorSyncQueueRepository(
 ): Required<
   Pick<
     ConnectorRepository,
-    "listSyncQueueItems" | "updateSyncQueueItemStatus"
+    "upsertSyncQueueItem" | "listSyncQueueItems" | "updateSyncQueueItemStatus"
   >
 > {
-  if (!connectors?.listSyncQueueItems || !connectors.updateSyncQueueItemStatus) {
+  if (!connectors?.upsertSyncQueueItem || !connectors.listSyncQueueItems || !connectors.updateSyncQueueItemStatus) {
     validation(
       "Connector sync queue requires a store with connector sync queue support.",
     );
@@ -636,7 +762,7 @@ function requireConnectorSyncQueueRepository(
   return connectors as Required<
     Pick<
       ConnectorRepository,
-      "listSyncQueueItems" | "updateSyncQueueItemStatus"
+      "upsertSyncQueueItem" | "listSyncQueueItems" | "updateSyncQueueItemStatus"
     >
   >;
 }

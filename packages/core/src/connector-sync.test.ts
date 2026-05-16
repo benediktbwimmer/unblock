@@ -8,9 +8,11 @@ import {
   listConnectorSyncPolicies,
   listConnectorSyncQueueItems,
   mergeConnectorSyncPolicies,
+  planConnectorSyncQueue,
   resolveConnectorSyncPolicy,
   updateConnectorSyncQueueItemStatus,
   upsertConnectorSyncPolicy,
+  upsertConnectorSyncQueueItems,
 } from "./connector-sync.js";
 import type { ConnectorExternalMapping, ConnectorSyncPolicyRecord, ConnectorSyncQueueItem } from "./types.js";
 
@@ -282,6 +284,116 @@ describe("connector sync queue items", () => {
         preset: "execution_layer",
         policyId: "jira-default",
       },
+    });
+  });
+
+  it("plans idempotent queue items from resolved field decisions", async () => {
+    const base = connectorSyncPolicyPreset("github", "execution_layer");
+    const task = taskView("GH-1", ["backend"]);
+    const resolution = resolveConnectorSyncPolicy({
+      provider: "github",
+      defaultPolicy: base,
+      task,
+      tasks: [task],
+      dependencies: [],
+    });
+    const mapping: ConnectorExternalMapping = {
+      projectId: "PROJECT",
+      connectionId: "github-main",
+      provider: "github",
+      externalKind: "issue",
+      externalId: "acme/repo#1",
+      externalUrl: "https://github.com/acme/repo/issues/1",
+      externalVersion: "e-1",
+      localKind: "task",
+      localId: "GH-1",
+      localVersion: "l-1",
+      syncDirection: "bidirectional",
+      conflictPolicy: "operator_review",
+      status: "active",
+      createdAt: "2026-05-16T00:00:00.000Z",
+      updatedAt: "2026-05-16T00:00:00.000Z",
+      archivedAt: null,
+      metadata: {},
+    };
+
+    const input = {
+      resolution,
+      mapping,
+      now: "2026-05-16T00:00:01.000Z",
+      autoApply: true,
+      externalSnapshot: { title: "External", labels: ["bug"] },
+      localSnapshot: { title: "Local", labels: ["backend"] },
+      diffs: [
+        {
+          field: "title",
+          externalValue: "External",
+          localValue: "Local",
+          externalVersion: "e-2",
+          localVersion: "l-1",
+        },
+        {
+          field: "labels",
+          externalValue: ["bug"],
+          localValue: ["backend"],
+          externalVersion: "e-2",
+          localVersion: "l-1",
+        },
+      ],
+    };
+
+    const first = planConnectorSyncQueue(input);
+    const second = planConnectorSyncQueue(input);
+
+    expect(first.items.map((item) => item.id)).toEqual(
+      second.items.map((item) => item.id),
+    );
+    expect(first.autoApplyItems).toHaveLength(2);
+    expect(first.items).toEqual([
+      expect.objectContaining({
+        status: "auto_applying",
+        decision: expect.objectContaining({ kind: "apply_inbound" }),
+        policyRef: expect.objectContaining({ preset: "execution_layer" }),
+      }),
+      expect.objectContaining({
+        status: "auto_applying",
+        decision: expect.objectContaining({ kind: "apply_inbound" }),
+      }),
+    ]);
+
+    const connectors = new FakeConnectors();
+    await upsertConnectorSyncQueueItems({ connectors } as any, first.items);
+    await upsertConnectorSyncQueueItems({ connectors } as any, second.items);
+    expect(await connectors.listSyncQueueItems({ projectId: "PROJECT" }))
+      .toHaveLength(2);
+  });
+
+  it("preserves manual review decisions when auto-apply is enabled", () => {
+    const base = connectorSyncPolicyPreset("jira", "bidirectional_project_sync");
+    const task = taskView("JIRA-1", []);
+    const resolution = resolveConnectorSyncPolicy({
+      provider: "jira",
+      defaultPolicy: base,
+      task,
+      tasks: [task],
+      dependencies: [],
+    });
+
+    const plan = planConnectorSyncQueue({
+      resolution,
+      autoApply: true,
+      diffs: [{
+        field: "external_state",
+        externalValue: "Done",
+        localValue: "In Progress",
+      }],
+    });
+
+    expect(plan.autoApplyItems).toHaveLength(0);
+    expect(plan.manualReviewItems).toHaveLength(1);
+    expect(plan.items[0]).toMatchObject({
+      status: "manual_review",
+      decision: { kind: "manual_review" },
     });
   });
 });
