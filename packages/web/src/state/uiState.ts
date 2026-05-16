@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { DEFAULT_APP_CONFIG, DEFAULT_STATUS_FILTERS, DEFAULT_UI_STATE, STATUS_FILTER_ORDER, UI_STATE_KEY, type ActivityTimelineRange, type ActivityUiState, type AppConfig, type AppliedTaskFilters, type StatusFilter, type UiState, type ViewMode } from "../types";
+import { parseUnifiedQuery } from "../query/unifiedQuery";
+
+const OBSOLETE_UI_STATE_KEYS = ["unblock.ui-state.v1"];
 
 export function appliedFiltersFromUiState(uiState: UiState): AppliedTaskFilters {
+  const query = parseUnifiedQuery(uiState.query);
   return {
     statusFilters: normalizeStatusFilters(uiState.statusFilters),
-    search: uiState.search.trim(),
-    matcher: uiState.matcher.trim()
+    search: query.errors.length > 0 ? "" : query.search,
+    matcher: query.errors.length > 0 ? "" : query.filter
   };
 }
 
@@ -56,6 +60,9 @@ export function usePersistentUiState(enabled: boolean): [UiState, Dispatch<SetSt
 
 function readStoredUiState(): UiState {
   try {
+    for (const key of OBSOLETE_UI_STATE_KEYS) {
+      window.localStorage.removeItem(key);
+    }
     const raw = window.localStorage.getItem(UI_STATE_KEY);
     if (!raw) {
       return DEFAULT_UI_STATE;
@@ -80,8 +87,7 @@ function normalizeUiState(input: unknown): UiState {
     projectId: typeof record.projectId === "string" && record.projectId.trim() ? record.projectId : DEFAULT_UI_STATE.projectId,
     selectedId,
     statusFilters,
-    search: typeof record.search === "string" ? record.search : "",
-    matcher: typeof record.matcher === "string" ? record.matcher : "",
+    query: typeof record.query === "string" ? record.query : "",
     selectedViewId: typeof record.selectedViewId === "string" ? record.selectedViewId : "",
     activity: normalizeActivityUiState(record.activity),
     collapsedTaskIds,
@@ -97,16 +103,18 @@ function normalizeActivityUiState(input: unknown): ActivityUiState {
   const range = isActivityTimelineRange(record.range) ? record.range : DEFAULT_UI_STATE.activity.range;
   const showEvents = typeof record.showEvents === "boolean" ? record.showEvents : DEFAULT_UI_STATE.activity.showEvents;
   return {
-    matcher: typeof record.matcher === "string" ? record.matcher : "",
-    appliedMatcher: typeof record.appliedMatcher === "string" ? record.appliedMatcher : "",
+    query: typeof record.query === "string" ? record.query : "",
+    appliedQuery: typeof record.appliedQuery === "string" ? record.appliedQuery : "",
     range,
+    customStart: typeof record.customStart === "string" && record.customStart ? record.customStart : null,
+    customEnd: typeof record.customEnd === "string" && record.customEnd ? record.customEnd : null,
     showEvents,
     showRoutineEvents: showEvents && typeof record.showRoutineEvents === "boolean" ? record.showRoutineEvents : DEFAULT_UI_STATE.activity.showRoutineEvents
   };
 }
 
 function isActivityTimelineRange(value: unknown): value is ActivityTimelineRange {
-  return value === "fit" || value === "6h" || value === "24h" || value === "7d" || value === "all";
+  return value === "1h" || value === "6h" || value === "24h" || value === "7d" || value === "all" || value === "custom";
 }
 
 function normalizeScrollPositions(input: unknown): Record<string, number> {

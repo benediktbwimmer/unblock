@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type WheelEvent } from "react";
 import { Archive, Check, CircleDot, Edit3, Filter, GitBranch, ListChecks, MessageSquare, Plus, RefreshCw, X } from "lucide-react";
 import { fetchJson, mutate, withProject } from "../api";
 import { DependencyItem, MarkdownContent, Metric, StatusDot } from "../components/common";
 import { TopMatcherEditor } from "../matcher/MatcherEditor";
+import { parseUnifiedQuery } from "../query/unifiedQuery";
 import type { ActivityRecord, ActivityTimelineRange, ActivityUiState, CommentRecord, ComputedStatus, Explanation, MatcherGrammarRecord, TaskAction, TaskView } from "../types";
 import { formatActorRef } from "../utils/format";
 
@@ -31,6 +32,14 @@ interface TimelineWindow {
   durationMs: number;
 }
 
+interface TimelineTooltipState {
+  text: string;
+  anchorX: number;
+  anchorTop: number;
+  anchorBottom: number;
+  bounds: { left: number; top: number; right: number; bottom: number };
+}
+
 export function ActivityView({
   initialActivity,
   projectId,
@@ -52,28 +61,40 @@ export function ActivityView({
   const [selectedTask, setSelectedTask] = useState<TaskView | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<ActivityRecord | null>(null);
   const [drawerTask, setDrawerTask] = useState<TaskView | null>(null);
+  const [drawerEvent, setDrawerEvent] = useState<ActivityRecord | null>(null);
   const [drawerExplanation, setDrawerExplanation] = useState<Explanation | null>(null);
   const [drawerComments, setDrawerComments] = useState<CommentRecord[]>([]);
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [drawerError, setDrawerError] = useState<string | null>(null);
+  const [queryError, setQueryError] = useState<string | null>(null);
+  const [tooltip, setTooltip] = useState<TimelineTooltipState | null>(null);
   const timelineShellRef = useRef<HTMLDivElement | null>(null);
-  const matcher = state.matcher;
-  const appliedMatcher = state.appliedMatcher;
+  const drawerRequestRef = useRef(0);
+  const query = state.query;
+  const appliedQuery = state.appliedQuery;
+  const draftQuery = useMemo(() => parseUnifiedQuery(query), [query]);
+  const queryDirty = draftQuery.errors.length > 0 || query.trim() !== appliedQuery;
   const range = state.range;
+  const customStart = state.customStart;
+  const customEnd = state.customEnd;
   const showEvents = state.showEvents;
   const showRoutineEvents = state.showRoutineEvents;
   const lanes = useMemo(() => buildTimelineLanes(activity), [activity]);
-  const windowRange = useMemo(() => buildTimelineWindow(lanes, activity, range, showEvents), [activity, lanes, range, showEvents]);
+  const windowRange = useMemo(() => buildTimelineWindow(lanes, activity, range, showEvents, customStart, customEnd), [activity, lanes, range, showEvents, customStart, customEnd]);
   const ticks = useMemo(() => buildTimeTicks(windowRange, range), [range, windowRange]);
   const timelineWidth = useMemo(() => timelineWidthForRange(range, windowRange), [range, windowRange]);
-  const nowIso = new Date().toISOString();
-  const nowVisible = timeInWindow(nowIso, windowRange);
-  const nowLeft = timePercent(nowIso, windowRange);
+  const rangeStartInput = range === "custom" && customStart ? customStart : formatDateTimeLocal(windowRange.start);
+  const rangeEndInput = range === "custom" && customEnd ? customEnd : formatDateTimeLocal(windowRange.end);
+  const inspectorOpen = Boolean(selectedTask || selectedEvent);
   const visibleLanes = useMemo(() => lanes.filter((lane) => {
     const hasVisibleSession = lane.sessions.some((session) => sessionOverlapsWindow(session, windowRange));
     const hasVisiblePoint = showEvents && lane.points.some((point) => timeInWindow(point.createdAt, windowRange) && shouldShowTimelineEvent(point, showRoutineEvents));
     return hasVisibleSession || hasVisiblePoint;
   }), [lanes, showEvents, showRoutineEvents, windowRange]);
+  const timelineEndPadding = useMemo(() => {
+    const hasActiveEdgeSession = visibleLanes.some((lane) => lane.sessions.some((session) => !session.endAt && sessionOverlapsWindow(session, windowRange)));
+    return hasActiveEdgeSession ? 36 : 0;
+  }, [visibleLanes, windowRange]);
   const totals = useMemo(() => ({
     active: lanes.reduce((sum, lane) => sum + lane.sessions.filter((session) => !session.endAt).length, 0),
     sessions: lanes.reduce((sum, lane) => sum + lane.sessions.length, 0),
@@ -81,21 +102,26 @@ export function ActivityView({
   }), [activity.length, lanes]);
 
   useEffect(() => {
-    if (!appliedMatcher.trim()) {
+    if (!appliedQuery.trim()) {
       setActivity(initialActivity);
     }
-  }, [appliedMatcher, initialActivity]);
+  }, [appliedQuery, initialActivity]);
 
   useEffect(() => {
-    const element = timelineShellRef.current;
-    if (element) {
-      element.scrollLeft = element.scrollWidth;
-    }
-  }, [range, visibleLanes.length, activity.length, nowLeft, timelineWidth]);
+    const frame = window.requestAnimationFrame(() => {
+      const element = timelineShellRef.current;
+      if (element) {
+        const grid = element.querySelector<HTMLElement>(".timeline-grid");
+        const rightEdge = grid ? grid.offsetWidth + timelineEndPadding : element.scrollWidth;
+        element.scrollLeft = Math.max(0, rightEdge - element.clientWidth);
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [range, visibleLanes.length, activity.length, timelineWidth, inspectorOpen, timelineEndPadding]);
 
   useEffect(() => {
-    if (appliedMatcher.trim()) {
-      void loadActivity(appliedMatcher);
+    if (appliedQuery.trim()) {
+      void loadActivity(appliedQuery);
     }
   }, [projectId]);
 
@@ -103,31 +129,74 @@ export function ActivityView({
     onStateChange(patch);
   }
 
-  async function loadActivity(nextMatcher = appliedMatcher) {
+  async function loadActivity(nextQuery = appliedQuery) {
+    const parsed = parseUnifiedQuery(nextQuery);
+    if (parsed.errors.length > 0) {
+      setQueryError(parsed.errors.join(" "));
+      return;
+    }
+    setQueryError(null);
     setLoading(true);
     try {
       const params = new URLSearchParams({ projectId, limit: "200" });
-      if (nextMatcher.trim()) {
-        params.set("where", nextMatcher.trim());
+      if (parsed.filter) {
+        params.set("where", parsed.filter);
       }
       const next = await fetchJson<ActivityRecord[]>(`/api/activity?${params.toString()}`);
-      setActivity(next);
-      updateState({ appliedMatcher: nextMatcher.trim(), matcher: nextMatcher });
+      setActivity(parsed.search ? filterActivityBySearch(next, parsed.search) : next);
+      updateState({ appliedQuery: nextQuery.trim(), query: nextQuery });
     } finally {
       setLoading(false);
     }
   }
 
-  function applyMatcher() {
-    void loadActivity(matcher);
+  function applyQuery() {
+    void loadActivity(query);
+  }
+
+  function selectRange(nextRange: Exclude<TimelineRange, "custom">) {
+    updateState({ range: nextRange });
+  }
+
+  function updateCustomStart(nextStart: string) {
+    const nextEnd = ensureCustomEndAfterStart(nextStart, customEnd ?? rangeEndInput);
+    updateState({ range: "custom", customStart: nextStart || null, customEnd: nextEnd });
+  }
+
+  function updateCustomEnd(nextEnd: string) {
+    const nextStart = ensureCustomStartBeforeEnd(customStart ?? rangeStartInput, nextEnd);
+    updateState({ range: "custom", customStart: nextStart, customEnd: nextEnd || null });
+  }
+
+  function scrollTimelineHorizontally(event: WheelEvent<HTMLDivElement>) {
+    if (!event.shiftKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
+      return;
+    }
+    event.currentTarget.scrollLeft += event.deltaY;
+    event.preventDefault();
+  }
+
+  function showTimelineTooltip(event: MouseEvent<HTMLElement>, text: string) {
+    const targetRect = event.currentTarget.getBoundingClientRect();
+    const shellRect = timelineShellRef.current?.getBoundingClientRect();
+    setTooltip({
+      text,
+      anchorX: targetRect.left + targetRect.width / 2,
+      anchorTop: targetRect.top,
+      anchorBottom: targetRect.bottom,
+      bounds: shellRect
+        ? { left: shellRect.left, top: shellRect.top, right: shellRect.right, bottom: shellRect.bottom }
+        : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight }
+    });
   }
 
   async function openActivityTask(task: TaskView, event: ActivityRecord | null = null) {
+    const requestId = drawerRequestRef.current + 1;
+    drawerRequestRef.current = requestId;
     setSelectedTask(task);
     setSelectedEvent(event);
-    setDrawerTask(task);
-    setDrawerExplanation(null);
-    setDrawerComments([]);
+    setDrawerTask((currentTask) => currentTask ?? task);
+    setDrawerEvent((currentEvent) => currentEvent ?? event);
     setDrawerError(null);
     setDrawerLoading(true);
     try {
@@ -136,23 +205,35 @@ export function ActivityView({
         fetchJson<Explanation>(withProject(`/api/tasks/${task.id}/explain`, projectId)),
         fetchJson<CommentRecord[]>(withProject(`/api/tasks/${task.id}/comments?limit=50`, projectId))
       ]);
+      if (drawerRequestRef.current !== requestId) {
+        return;
+      }
       setDrawerTask(freshTask);
+      setDrawerEvent(event);
       setDrawerExplanation(explanation);
       setDrawerComments(comments);
     } catch (error) {
+      if (drawerRequestRef.current !== requestId) {
+        return;
+      }
       setDrawerError(error instanceof Error ? error.message : String(error));
     } finally {
-      setDrawerLoading(false);
+      if (drawerRequestRef.current === requestId) {
+        setDrawerLoading(false);
+      }
     }
   }
 
   function closeDrawer() {
+    drawerRequestRef.current += 1;
     setSelectedTask(null);
     setSelectedEvent(null);
     setDrawerTask(null);
+    setDrawerEvent(null);
     setDrawerExplanation(null);
     setDrawerComments([]);
     setDrawerError(null);
+    setDrawerLoading(false);
   }
 
   async function refreshDrawer(taskId: string) {
@@ -189,166 +270,233 @@ export function ActivityView({
       </div>
 
       <div className="activity-filter-row">
-        <div className={matcher.trim() !== appliedMatcher ? "activity-matcher dirty" : "activity-matcher"}>
-          <button className="matcher-icon-button" onClick={() => setSuggestSignal((value) => value + 1)} title="Show matcher suggestions"><Filter size={17} /></button>
+        <div className={queryDirty ? "activity-matcher unified-query dirty" : "activity-matcher unified-query"}>
+          <button className="matcher-icon-button" onClick={() => setSuggestSignal((value) => value + 1)} title="Show query suggestions"><Filter size={17} /></button>
           <TopMatcherEditor
-            value={matcher}
+            value={query}
             projectId={projectId}
             grammar={grammar}
             suggestSignal={suggestSignal}
-            onChange={(nextMatcher) => updateState({ matcher: nextMatcher })}
-            onApply={applyMatcher}
+            variant="query"
+            onChange={(nextQuery) => updateState({ query: nextQuery })}
+            onApply={applyQuery}
           />
-          {!matcher ? <span className="matcher-placeholder">assigned = bw-mbp:codex-b or tag = backend</span> : null}
+          {!query ? <span className="matcher-placeholder">Search activity or use filter(assigned = bw-mbp:codex-b)</span> : null}
         </div>
         <span className="shortcut-hint matcher-shortcut"><kbd>Shift</kbd> + <kbd>Enter</kbd></span>
-        <button className="primary-button" disabled={loading || matcher.trim() === appliedMatcher} onClick={applyMatcher}><Check size={16} /> Apply</button>
-        {appliedMatcher ? <button disabled={loading} onClick={() => { updateState({ matcher: "", appliedMatcher: "" }); void loadActivity(""); }}>Clear</button> : null}
+        <button className="primary-button" disabled={loading || !queryDirty} onClick={applyQuery}><Check size={16} /> Apply</button>
+        {appliedQuery ? <button disabled={loading} onClick={() => { updateState({ query: "", appliedQuery: "" }); void loadActivity(""); }}>Clear</button> : null}
         <button className="icon-button" disabled={loading} onClick={() => void loadActivity()} title="Refresh"><RefreshCw size={16} /></button>
         <div className="timeline-view-tabs" aria-label="Activity layers">
           <button className="active" title="Show task work sessions">Sessions</button>
           <button className={showEvents ? "active" : ""} onClick={() => updateState({ showEvents: !showEvents, showRoutineEvents: !showEvents ? showRoutineEvents : false })} title="Show event annotations on the timeline">Events</button>
           <button className={showRoutineEvents ? "active" : ""} disabled={!showEvents} onClick={() => updateState({ showRoutineEvents: !showRoutineEvents })} title="Include routine task update events">Updates</button>
         </div>
+      </div>
+      <div className="activity-time-row">
         <div className="timeline-range-tabs" role="tablist" aria-label="Activity time range">
           {[
-            ["fit", "Fit"],
+            ["1h", "1h"],
             ["6h", "6h"],
             ["24h", "24h"],
             ["7d", "7d"],
             ["all", "All"]
           ].map(([value, label]) => (
-            <button key={value} className={range === value ? "active" : ""} onClick={() => updateState({ range: value as TimelineRange })}>{label}</button>
+            <button key={value} className={range === value ? "active" : ""} onClick={() => selectRange(value as Exclude<TimelineRange, "custom">)}>{label}</button>
           ))}
         </div>
+        <label className={range === "custom" ? "time-input active" : "time-input"}>
+          <span>Start</span>
+          <input type="datetime-local" value={rangeStartInput} onChange={(event) => updateCustomStart(event.target.value)} />
+        </label>
+        <label className={range === "custom" ? "time-input active" : "time-input"}>
+          <span>End</span>
+          <input type="datetime-local" value={rangeEndInput} onChange={(event) => updateCustomEnd(event.target.value)} />
+        </label>
       </div>
+      {queryError ? <div className="error compact">{queryError}</div> : null}
 
-      <div className="timeline-shell" ref={timelineShellRef}>
-        <div className="timeline-grid" style={{ ["--timeline-width" as string]: `${timelineWidth}px` }}>
-          <div className="time-axis-corner">Actor</div>
-          <div className="time-axis">
-            {ticks.map((tick) => (
-              <div className="time-tick" key={tick.iso} style={{ left: `${tick.left}%` }}>
-                <span>{tick.label}</span>
-              </div>
-            ))}
-            {nowVisible ? <div className="now-line axis" style={{ left: `${nowLeft}%` }}><span>now</span></div> : null}
-          </div>
-          {visibleLanes.map((lane) => {
-            const visibleSessions = lane.sessions.filter((session) => sessionOverlapsWindow(session, windowRange));
-            const packedSessions = packTimelineSessions(visibleSessions);
-            const visiblePoints = showEvents
-              ? lane.points.filter((point) => timeInWindow(point.createdAt, windowRange) && shouldShowTimelineEvent(point, showRoutineEvents))
-              : [];
-            const laneHeight = timelineLaneHeight(packedSessions.trackCount, visiblePoints.length);
-            return (
-              <div className="timeline-row" key={lane.actor} style={{ minHeight: laneHeight }}>
-                <div className="timeline-lane-label">
-                  <strong>{lane.actor}</strong>
-                  <span>{lane.sessions.filter((session) => !session.endAt).length} active · {visibleSessions.length} in view · {relativeTime(lane.latestAt)}</span>
+      <div className={inspectorOpen ? "activity-main inspector-open" : "activity-main"}>
+        <div className="timeline-shell" ref={timelineShellRef} style={{ ["--timeline-end-padding" as string]: `${timelineEndPadding}px` }} onClick={closeDrawer} onWheel={scrollTimelineHorizontally}>
+          <div className="timeline-grid" style={{ ["--timeline-width" as string]: `${timelineWidth}px` }}>
+            <div className="time-axis-corner">Actor</div>
+            <div className="time-axis">
+              {ticks.map((tick) => (
+                <div className="time-tick" key={tick.iso} style={{ left: `${tick.left}%` }}>
+                  <span>{tick.label}</span>
                 </div>
-                <div className="timeline-lane-track" style={{ minHeight: laneHeight }}>
-                  <div className="timeline-gridlines">
-                    {ticks.map((tick) => <span key={tick.iso} style={{ left: `${tick.left}%` }} />)}
+              ))}
+            </div>
+            {visibleLanes.map((lane) => {
+              const visibleSessions = lane.sessions.filter((session) => sessionOverlapsWindow(session, windowRange));
+              const packedSessions = packTimelineSessions(visibleSessions);
+              const visiblePoints = showEvents
+                ? lane.points.filter((point) => timeInWindow(point.createdAt, windowRange) && shouldShowTimelineEvent(point, showRoutineEvents))
+                : [];
+              const laneHeight = timelineLaneHeight(packedSessions.trackCount, visiblePoints.length);
+              return (
+                <div className="timeline-row" key={lane.actor} style={{ minHeight: laneHeight }}>
+                  <div className="timeline-lane-label">
+                    <strong>{lane.actor}</strong>
+                    <span>{lane.sessions.filter((session) => !session.endAt).length} active · {visibleSessions.length} in view · {relativeTime(lane.latestAt)}</span>
                   </div>
-                  {nowVisible ? <div className="now-line" style={{ left: `${nowLeft}%` }} /> : null}
-                  {packedSessions.items.map(({ session, track }) => {
-                    const placement = sessionPlacement(session, windowRange);
-                    const visibleSessionEvents = showEvents
-                      ? session.events.filter((event) => timeInWindow(event.createdAt, windowRange) && shouldShowTimelineEvent(event, showRoutineEvents))
-                      : [];
-                    return (
-                      <div
-                        className={`timeline-session ${session.outcome} ${selectedTask?.id === session.task.id ? "selected" : ""}`}
-                        key={session.id}
-                        style={{ left: `${placement.left}%`, width: `${placement.width}%`, top: `${timelineSessionTop(track)}px` }}
-                        data-tooltip={`${session.task.id} · ${session.task.title} · ${formatTimeRange(session.startAt, session.endAt)} · ${formatDuration(session.startAt, session.endAt ?? new Date().toISOString())}`}
-                      >
-                        <button
+                  <div className="timeline-lane-track" style={{ minHeight: laneHeight }}>
+                    <div className="timeline-gridlines">
+                      {ticks.map((tick) => <span key={tick.iso} style={{ left: `${tick.left}%` }} />)}
+                    </div>
+                    {packedSessions.items.map(({ session, track }) => {
+                      const placement = sessionPlacement(session, windowRange);
+                      const sessionTooltip = `${session.task.id} · ${session.task.title} · ${formatTimeRange(session.startAt, session.endAt)} · ${formatDuration(session.startAt, session.endAt ?? new Date().toISOString())}`;
+                      const visibleSessionEvents = showEvents
+                        ? session.events.filter((event) => timeInWindow(event.createdAt, windowRange) && shouldShowTimelineEvent(event, showRoutineEvents))
+                        : [];
+                      return (
+                        <div
+                          className={`timeline-session ${session.outcome} ${selectedTask?.id === session.task.id ? "selected selected-task" : ""}`}
+                          key={session.id}
+                          style={{ left: `${placement.left}%`, width: `${placement.width}%`, top: `${timelineSessionTop(track)}px` }}
+                          data-tooltip={sessionTooltip}
+                          onMouseEnter={(event) => showTimelineTooltip(event, sessionTooltip)}
+                          onMouseLeave={() => setTooltip(null)}
+                        >
+                          <button
                           className="timeline-session-bar"
                           aria-label={`${session.task.id} ${session.task.title}`}
-                          onClick={() => void openActivityTask(session.task, session.events.at(-1) ?? null)}
-                        >
-                          <span>{session.task.id}</span>
-                          <strong>{session.task.title}</strong>
-                          <em>{formatDuration(session.startAt, session.endAt ?? new Date().toISOString())}</em>
-                        </button>
-                        <span className="session-endpoint start" title={`Started ${new Date(session.startAt).toLocaleString()}`} />
-                        {session.endAt ? <span className="session-endpoint end" title={`${formatSessionOutcome(session)} ${new Date(session.endAt).toLocaleString()}`} /> : <span className="session-live-pulse" title="In progress" />}
-                        {visibleSessionEvents.map((event) => (
-                          <button
-                            className={`timeline-annotation ${markerTone(event.type)} ${selectedEvent?.id === event.id ? "selected" : ""}`}
-                            key={event.id}
-                            style={{ left: `${sessionEventPercent(event, session, windowRange)}%` }}
-                            data-tooltip={`${event.type}: ${event.message}`}
-                            aria-label={`${event.type}: ${event.message}`}
-                            onClick={(clickEvent) => {
-                              clickEvent.stopPropagation();
-                              void openActivityTask(session.task, event);
-                            }}
+                          onClick={(clickEvent) => {
+                            clickEvent.stopPropagation();
+                            clickEvent.currentTarget.blur();
+                            void openActivityTask(session.task, session.events.at(-1) ?? null);
+                          }}
                           >
-                            <TimelineEventIcon type={event.type} />
+                            <span>{session.task.id}</span>
+                            <strong>{session.task.title}</strong>
+                            <em>{formatDuration(session.startAt, session.endAt ?? new Date().toISOString())}</em>
                           </button>
-                        ))}
-                      </div>
-                    );
-                  })}
-                  {visiblePoints.map((event, pointIndex) => (
-                    <button
-                      className={`timeline-marker point ${markerTone(event.type)} ${selectedEvent?.id === event.id ? "selected" : ""}`}
-                      key={event.id}
-                      style={{ left: `${timePercent(event.createdAt, windowRange)}%`, top: `${timelinePointTop(packedSessions.trackCount, pointIndex)}px` }}
-                      data-tooltip={`${event.type}: ${event.message}`}
-                      aria-label={`${event.type}: ${event.message}`}
-                      onClick={() => {
-                        setSelectedEvent(event);
-                        if (event.task) {
-                          void openActivityTask(event.task, event);
-                        } else {
-                          setSelectedTask(null);
-                          setDrawerTask(null);
-                        }
-                      }}
-                    >
-                      <TimelineEventIcon type={event.type} />
-                    </button>
-                  ))}
-                  {visibleSessions.length === 0 && visiblePoints.length === 0 ? <span className="timeline-empty">No events in range</span> : null}
+                          <span className="session-endpoint start" title={`Started ${new Date(session.startAt).toLocaleString()}`} />
+                          {session.endAt ? <span className="session-endpoint end" title={`${formatSessionOutcome(session)} ${new Date(session.endAt).toLocaleString()}`} /> : <span className="session-live-pulse" title="In progress" />}
+                          {visibleSessionEvents.map((event) => {
+                            const eventTooltip = `${event.type}: ${event.message}`;
+                            return (
+                              <button
+                                className={`timeline-annotation ${markerTone(event.type)} ${selectedEvent?.id === event.id ? "selected" : ""}`}
+                                key={event.id}
+                                style={{ left: `${sessionEventPercent(event, session, windowRange)}%` }}
+                                data-tooltip={eventTooltip}
+                                aria-label={eventTooltip}
+                                onMouseEnter={(hoverEvent) => showTimelineTooltip(hoverEvent, eventTooltip)}
+                                onMouseLeave={() => setTooltip(null)}
+                                onClick={(clickEvent) => {
+                                  clickEvent.stopPropagation();
+                                  clickEvent.currentTarget.blur();
+                                  void openActivityTask(session.task, event);
+                                }}
+                              >
+                                <TimelineEventIcon type={event.type} />
+                              </button>
+                            );
+                          })}
+                        </div>
+                      );
+                    })}
+                    {visiblePoints.map((event, pointIndex) => {
+                      const eventTooltip = `${event.type}: ${event.message}`;
+                      return (
+                        <button
+                          className={`timeline-marker point ${markerTone(event.type)} ${selectedEvent?.id === event.id ? "selected" : ""}`}
+                          key={event.id}
+                          style={{ left: `${timePercent(event.createdAt, windowRange)}%`, top: `${timelinePointTop(packedSessions.trackCount, pointIndex)}px` }}
+                          data-tooltip={eventTooltip}
+                          aria-label={eventTooltip}
+                          onMouseEnter={(hoverEvent) => showTimelineTooltip(hoverEvent, eventTooltip)}
+                          onMouseLeave={() => setTooltip(null)}
+                          onClick={(clickEvent) => {
+                            clickEvent.stopPropagation();
+                            clickEvent.currentTarget.blur();
+                            if (event.task) {
+                              void openActivityTask(event.task, event);
+                            } else {
+                              closeDrawer();
+                            }
+                          }}
+                        >
+                          <TimelineEventIcon type={event.type} />
+                        </button>
+                      );
+                    })}
+                    {visibleSessions.length === 0 && visiblePoints.length === 0 ? <span className="timeline-empty">No events in range</span> : null}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-          {visibleLanes.length === 0 ? <p className="muted timeline-no-results">No activity matches this view.</p> : null}
+              );
+            })}
+            {visibleLanes.length === 0 ? <p className="muted timeline-no-results">No activity matches this view.</p> : null}
+          </div>
+        </div>
+        {tooltip ? <TimelineTooltip tooltip={tooltip} /> : null}
+
+        <div className="activity-inspector-slot" aria-hidden={inspectorOpen ? undefined : true}>
+          {inspectorOpen ? (
+            <ActivityInspector
+              task={drawerTask}
+              event={drawerEvent}
+              explanation={drawerExplanation}
+              comments={drawerComments}
+              loading={drawerLoading}
+              error={drawerError}
+              onClose={closeDrawer}
+              onOpenInTasks={(task) => onOpenTask(task)}
+              onUpdate={async (task, input) => {
+                await mutate(withProject(`/api/tasks/${task.id}`, projectId), { method: "PATCH", body: input });
+                await Promise.all([refreshDrawer(task.id), loadActivity()]);
+              }}
+              onTransition={(task, action) => void mutateDrawerTask(task, `/${action}`)}
+              onRelease={(task, reason) => void mutateDrawerTask(task, "/release", { reason })}
+              onAddComment={async (task, body) => {
+                await mutate(withProject(`/api/tasks/${task.id}/comments`, projectId), { method: "POST", body: { body } });
+                await Promise.all([refreshDrawer(task.id), loadActivity()]);
+              }}
+            />
+          ) : null}
         </div>
       </div>
-
-      {drawerTask || selectedEvent ? (
-        <ActivityOverlay
-          task={drawerTask}
-          event={selectedEvent}
-          explanation={drawerExplanation}
-          comments={drawerComments}
-          loading={drawerLoading}
-          error={drawerError}
-          onClose={closeDrawer}
-          onOpenInTasks={(task) => onOpenTask(task)}
-          onUpdate={async (task, input) => {
-            await mutate(withProject(`/api/tasks/${task.id}`, projectId), { method: "PATCH", body: input });
-            await Promise.all([refreshDrawer(task.id), loadActivity()]);
-          }}
-          onTransition={(task, action) => void mutateDrawerTask(task, `/${action}`)}
-          onRelease={(task, reason) => void mutateDrawerTask(task, "/release", { reason })}
-          onAddComment={async (task, body) => {
-            await mutate(withProject(`/api/tasks/${task.id}/comments`, projectId), { method: "POST", body: { body } });
-            await Promise.all([refreshDrawer(task.id), loadActivity()]);
-          }}
-        />
-      ) : null}
     </section>
   );
 }
 
-function ActivityOverlay({
+function TimelineTooltip({ tooltip }: { tooltip: TimelineTooltipState }) {
+  const tooltipRef = useRef<HTMLDivElement | null>(null);
+  const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const element = tooltipRef.current;
+    if (!element) {
+      return;
+    }
+    const rect = element.getBoundingClientRect();
+    const margin = 8;
+    const left = Math.min(
+      Math.max(tooltip.anchorX - rect.width / 2, tooltip.bounds.left + margin),
+      Math.max(tooltip.bounds.left + margin, tooltip.bounds.right - rect.width - margin)
+    );
+    const topAbove = tooltip.anchorTop - rect.height - margin;
+    const topBelow = tooltip.anchorBottom + margin;
+    const top = topAbove >= tooltip.bounds.top + margin
+      ? topAbove
+      : Math.min(topBelow, Math.max(tooltip.bounds.top + margin, tooltip.bounds.bottom - rect.height - margin));
+    setPosition({ left, top });
+  }, [tooltip]);
+
+  return (
+    <div
+      className="timeline-floating-tooltip"
+      ref={tooltipRef}
+      style={position ? { left: position.left, top: position.top } : { left: tooltip.anchorX, top: tooltip.anchorTop, visibility: "hidden" }}
+    >
+      {tooltip.text}
+    </div>
+  );
+}
+
+function ActivityInspector({
   task,
   event,
   explanation,
@@ -390,9 +538,7 @@ function ActivityOverlay({
   }, [task?.id, task?.title, task?.description]);
 
   return (
-    <div className="activity-overlay" role="dialog" aria-label="Activity detail">
-      <div className="activity-overlay-backdrop" onClick={onClose} />
-      <aside className="activity-drawer">
+      <aside className="activity-drawer" role="complementary" aria-label="Activity detail">
         <div className="activity-drawer-header">
           <div>
             <span>{event ? `${event.type} · ${relativeTime(event.createdAt)}` : "Task detail"}</span>
@@ -402,7 +548,7 @@ function ActivityOverlay({
         </div>
 
         {error ? <div className="error compact">{error}</div> : null}
-        {loading ? <div className="loading compact">Loading activity detail...</div> : null}
+        {loading && !task ? <div className="loading compact">Loading activity detail...</div> : null}
 
         {event ? (
           <section className="detail-section">
@@ -487,7 +633,6 @@ function ActivityOverlay({
           </>
         ) : null}
       </aside>
-    </div>
   );
 }
 
@@ -567,47 +712,55 @@ function buildTimelineLanes(activity: ActivityRecord[]): TimelineLane[] {
   }).sort((a, b) => b.latestAt.localeCompare(a.latestAt));
 }
 
-function buildTimelineWindow(lanes: TimelineLane[], activity: ActivityRecord[], range: TimelineRange, includePoints: boolean): TimelineWindow {
+function buildTimelineWindow(lanes: TimelineLane[], activity: ActivityRecord[], range: TimelineRange, includePoints: boolean, customStart: string | null, customEnd: string | null): TimelineWindow {
   const now = new Date();
+  const nowMs = now.getTime();
   const eventTimes = activity.map((event) => Date.parse(event.createdAt)).filter(Number.isFinite);
-  const sessionEnds = lanes.flatMap((lane) => lane.sessions.map((session) => Date.parse(session.endAt ?? session.startAt))).filter(Number.isFinite);
-  const fitTimes = includePoints ? [...eventTimes, ...sessionEnds] : sessionEnds;
-  const latestActivityMs = Math.max(...fitTimes, now.getTime());
-  const latestMs = range === "fit" ? Math.max(...fitTimes, now.getTime()) : Math.max(now.getTime(), ...eventTimes);
+  const sessionStarts = lanes.flatMap((lane) => lane.sessions.map((session) => Date.parse(session.startAt))).filter(Number.isFinite);
+  const sessionEnds = lanes.flatMap((lane) => lane.sessions.map((session) => Date.parse(session.endAt ?? new Date().toISOString()))).filter(Number.isFinite);
+  const activeSessionCount = lanes.reduce((count, lane) => count + lane.sessions.filter((session) => !session.endAt).length, 0);
+  const includedTimes = [
+    ...sessionStarts,
+    ...sessionEnds,
+    ...(includePoints ? eventTimes : [])
+  ];
   const starts = [
-    ...lanes.flatMap((lane) => lane.sessions.map((session) => Date.parse(session.startAt))),
+    ...sessionStarts,
     ...(includePoints ? eventTimes : [])
   ].filter(Number.isFinite);
-  const earliest = starts.length > 0 ? Math.min(...starts) : latestActivityMs - 24 * 60 * 60 * 1000;
-  if (range === "fit") {
-    const rawDuration = Math.max(45 * 60 * 1000, latestMs - earliest);
-    const pad = Math.min(30 * 60 * 1000, Math.max(5 * 60 * 1000, rawDuration * 0.08));
-    const start = new Date(earliest - pad);
-    const end = new Date(latestMs + pad);
+  const earliest = starts.length > 0 ? Math.min(...starts) : nowMs - 24 * 60 * 60 * 1000;
+  const latest = includedTimes.length > 0 ? Math.max(...includedTimes) : nowMs;
+
+  if (range === "custom") {
+    const customStartMs = parseDateTimeLocal(customStart);
+    const customEndMs = parseDateTimeLocal(customEnd);
+    if (customStartMs !== null && customEndMs !== null && customEndMs > customStartMs) {
+      const start = new Date(customStartMs);
+      const end = new Date(customEndMs);
+      return { start, end, durationMs: Math.max(1, end.getTime() - start.getTime()) };
+    }
+  }
+
+  if (range === "all") {
+    const start = new Date(earliest);
+    const end = new Date(activeSessionCount > 0 ? Math.max(latest, nowMs) : latest);
     return { start, end, durationMs: Math.max(1, end.getTime() - start.getTime()) };
   }
-  const duration = range === "6h"
-    ? 6 * 60 * 60 * 1000
-    : range === "24h"
-      ? 24 * 60 * 60 * 1000
-      : range === "7d"
-        ? 7 * 24 * 60 * 60 * 1000
-        : Math.max(60 * 60 * 1000, latestMs - earliest);
-  const end = new Date(latestMs + Math.min(45 * 60 * 1000, duration * 0.08));
-  const start = range === "all" ? new Date(earliest) : new Date(end.getTime() - duration);
+
+  const duration = rangeDurationMs(range);
+  const end = now;
+  const start = new Date(end.getTime() - duration);
   return { start, end, durationMs: Math.max(1, end.getTime() - start.getTime()) };
 }
 
 function buildTimeTicks(windowRange: TimelineWindow, range: TimelineRange): Array<{ iso: string; label: string; left: number }> {
-  const count = range === "fit"
-    ? 6
-    : range === "7d" || range === "all"
+  const count = range === "7d" || range === "all"
       ? 8
       : 7;
   return Array.from({ length: count }, (_, index) => {
     const ratio = index / (count - 1);
     const date = new Date(windowRange.start.getTime() + windowRange.durationMs * ratio);
-    const showClock = range === "fit" ? windowRange.durationMs <= 36 * 60 * 60 * 1000 : range === "6h" || range === "24h";
+    const showClock = range === "1h" || range === "6h" || range === "24h" || (range === "custom" && windowRange.durationMs <= 36 * 60 * 60 * 1000);
     const label = date.toLocaleString(undefined, showClock
       ? { hour: "2-digit", minute: "2-digit" }
       : { month: "short", day: "numeric" });
@@ -616,14 +769,65 @@ function buildTimeTicks(windowRange: TimelineWindow, range: TimelineRange): Arra
 }
 
 function timelineWidthForRange(range: TimelineRange, windowRange: TimelineWindow): number {
-  if (range === "fit") {
+  if (range === "custom" || range === "all") {
     const hours = windowRange.durationMs / (60 * 60 * 1000);
-    return Math.round(Math.min(1700, Math.max(1150, hours * 320)));
+    return Math.round(Math.min(5200, Math.max(1200, hours * 300)));
   }
+  if (range === "1h") return 1200;
   if (range === "6h") return 1800;
   if (range === "24h") return 1800;
   if (range === "7d") return 2600;
-  return 3200;
+  return 1800;
+}
+
+function rangeDurationMs(range: TimelineRange): number {
+  if (range === "1h") return 60 * 60 * 1000;
+  if (range === "6h") return 6 * 60 * 60 * 1000;
+  if (range === "24h") return 24 * 60 * 60 * 1000;
+  if (range === "7d") return 7 * 24 * 60 * 60 * 1000;
+  return 6 * 60 * 60 * 1000;
+}
+
+function parseDateTimeLocal(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? time : null;
+}
+
+function formatDateTimeLocal(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function shiftDateTimeLocal(value: string, deltaMs: number): string | null {
+  const time = parseDateTimeLocal(value);
+  return time === null ? null : formatDateTimeLocal(new Date(time + deltaMs));
+}
+
+function ensureCustomEndAfterStart(start: string, end: string): string | null {
+  const startTime = parseDateTimeLocal(start);
+  const endTime = parseDateTimeLocal(end);
+  if (startTime === null) {
+    return end || null;
+  }
+  if (endTime !== null && endTime > startTime) {
+    return end;
+  }
+  return shiftDateTimeLocal(start, 60 * 60 * 1000);
+}
+
+function ensureCustomStartBeforeEnd(start: string, end: string): string | null {
+  const startTime = parseDateTimeLocal(start);
+  const endTime = parseDateTimeLocal(end);
+  if (endTime === null) {
+    return start || null;
+  }
+  if (startTime !== null && startTime < endTime) {
+    return start;
+  }
+  return shiftDateTimeLocal(end, -60 * 60 * 1000);
 }
 
 function packTimelineSessions(sessions: TimelineSession[]): { items: Array<{ session: TimelineSession; track: number }>; trackCount: number } {
@@ -696,6 +900,30 @@ function shouldShowTimelineEvent(event: ActivityRecord, showRoutine: boolean): b
     return true;
   }
   return showRoutine;
+}
+
+function filterActivityBySearch(activity: ActivityRecord[], search: string): ActivityRecord[] {
+  const needle = search.trim().toLowerCase();
+  if (!needle) {
+    return activity;
+  }
+  return activity.filter((event) => {
+    const task = event.task;
+    const haystack = [
+      event.type,
+      event.message,
+      event.machine,
+      event.actor,
+      task?.id,
+      task?.title,
+      task?.description,
+      task?.sourceDoc,
+      task?.sourceSection,
+      task?.assignedTrack ? formatActorRef(task.assignedTrack) : null,
+      ...(task?.tags.flatMap((tag) => [tag.id, tag.name, tag.description]) ?? [])
+    ].filter(Boolean).join("\n").toLowerCase();
+    return haystack.includes(needle);
+  });
 }
 
 function clampPercent(value: number): number {

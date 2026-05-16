@@ -192,12 +192,14 @@ export interface SourceCoverage {
 export type ViewMode = "tasks" | "queues" | "tags" | "instructions" | "connectors" | "coverage" | "activity";
 export type StatusFilter = ComputedStatus;
 export type TaskAction = "start" | "finish" | "reopen" | "archive" | "restore";
-export type ActivityTimelineRange = "fit" | "6h" | "24h" | "7d" | "all";
+export type ActivityTimelineRange = "1h" | "6h" | "24h" | "7d" | "all" | "custom";
 
 export interface ActivityUiState {
-  matcher: string;
-  appliedMatcher: string;
+  query: string;
+  appliedQuery: string;
   range: ActivityTimelineRange;
+  customStart: string | null;
+  customEnd: string | null;
   showEvents: boolean;
   showRoutineEvents: boolean;
 }
@@ -219,8 +221,7 @@ export interface UiState {
   projectId: string;
   selectedId: string | null;
   statusFilters: StatusFilter[];
-  search: string;
-  matcher: string;
+  query: string;
   selectedViewId: string;
   activity: ActivityUiState;
   collapsedTaskIds: string[];
@@ -376,7 +377,7 @@ export interface DependencyCandidateState {
   reason: string | null;
 }
 
-export const UI_STATE_KEY = "unblock.ui-state.v1";
+export const UI_STATE_KEY = "unblock.ui-state.v2";
 export const STATUS_FILTER_ORDER: StatusFilter[] = ["ready", "blocked", "started", "finished", "archived"];
 export const DEFAULT_STATUS_FILTERS: StatusFilter[] = ["ready", "blocked", "started"];
 export const DEFAULT_APP_CONFIG: AppConfig = {
@@ -395,13 +396,14 @@ export const DEFAULT_UI_STATE: UiState = {
   projectId: "DEFAULT",
   selectedId: null,
   statusFilters: DEFAULT_STATUS_FILTERS,
-  search: "",
-  matcher: "",
+  query: "",
   selectedViewId: "",
   activity: {
-    matcher: "",
-    appliedMatcher: "",
-    range: "fit",
+    query: "",
+    appliedQuery: "",
+    range: "6h",
+    customStart: null,
+    customEnd: null,
     showEvents: false,
     showRoutineEvents: false
   },

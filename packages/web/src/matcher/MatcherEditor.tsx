@@ -8,6 +8,7 @@ export function TopMatcherEditor({
   projectId,
   grammar,
   suggestSignal,
+  variant = "matcher",
   onChange,
   onApply
 }: {
@@ -15,6 +16,7 @@ export function TopMatcherEditor({
   projectId: string;
   grammar: MatcherGrammarRecord | null;
   suggestSignal: number;
+  variant?: "matcher" | "query";
   onChange: (value: string) => void;
   onApply: () => void;
 }) {
@@ -39,7 +41,7 @@ export function TopMatcherEditor({
     editorRef.current = editor;
     if (grammar) {
       completionProviderRef.current?.dispose();
-      completionProviderRef.current = registerMatcherCompletions(monaco, projectId, grammar);
+      completionProviderRef.current = registerMatcherCompletions(monaco, projectId, grammar, variant);
     }
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Space, () => {
       editor.trigger("keyboard", "editor.action.triggerSuggest", {});
@@ -65,7 +67,7 @@ export function TopMatcherEditor({
         event.browserEvent.stopPropagation();
       }
     });
-  }, [grammar, projectId]);
+  }, [grammar, projectId, variant]);
 
   return (
     <div
@@ -80,7 +82,7 @@ export function TopMatcherEditor({
       }}
     >
       <Editor
-        key={`${projectId}-${grammar ? "ready" : "loading"}-top-matcher`}
+        key={`${projectId}-${grammar ? "ready" : "loading"}-${variant}-top-matcher`}
         height="34px"
         defaultLanguage="unblock-query"
         language="unblock-query"
@@ -189,7 +191,7 @@ export const configureMatcherLanguage: BeforeMount = (monaco) => {
     tokenizer: {
       root: [
         [/#.*$/, "comment"],
-        [/\b(and|or|not|in|is|empty|now|today|depth|tag|assigned|machine|actor|status|lifecycle|parent|priority|created|updated|started|finished|archived|id|source|doc|section|descendant|of)\b/, "keyword"],
+        [/\b(filter|search|and|or|not|in|is|empty|now|today|depth|tag|assigned|machine|actor|status|lifecycle|parent|priority|created|updated|started|finished|archived|id|source|doc|section|descendant|of)\b/, "keyword"],
         [/\b(depends|on|unblocks)\b/, "keyword.graph"],
         [/[()]/, "delimiter.parenthesis"],
         [/,/, "delimiter"],
@@ -227,17 +229,40 @@ export const configureMatcherLanguage: BeforeMount = (monaco) => {
   });
 };
 
-function registerMatcherCompletions(monaco: any, projectId: string, grammar: MatcherGrammarRecord): { dispose: () => void } {
+function registerMatcherCompletions(monaco: any, projectId: string, grammar: MatcherGrammarRecord, variant: "matcher" | "query"): { dispose: () => void } {
   return monaco.languages.registerCompletionItemProvider("unblock-query", {
     triggerCharacters: [" ", "=", "(", ",", ":", "-", "."],
     provideCompletionItems: async (model: any, position: { lineNumber: number; column: number }) => {
-      const line = model.getLineContent(position.lineNumber).slice(0, position.column - 1);
+      const rawLine = model.getLineContent(position.lineNumber).slice(0, position.column - 1);
+      const activeFilter = variant === "query" ? activeFilterPrefix(rawLine) : null;
+      const line = activeFilter?.text ?? rawLine;
       const token = currentMatcherToken(line);
       const range = new monaco.Range(position.lineNumber, position.column - token.length, position.lineNumber, position.column);
-      const context = getMatcherCompletionContext(line, grammar);
+      const context = activeFilter || variant === "matcher" ? getMatcherCompletionContext(line, grammar) : { kind: "query-root" as const };
       const suggestions: unknown[] = [];
 
-      if (context.kind === "value") {
+      if (context.kind === "query-root") {
+        suggestions.push(
+          {
+            label: "filter(...)",
+            kind: monaco.languages.CompletionItemKind.Function,
+            detail: "structured unblock filter",
+            insertText: "filter(${1:status = ready})",
+            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+            sortText: "000000",
+            range
+          },
+          {
+            label: "search(...)",
+            kind: monaco.languages.CompletionItemKind.Function,
+            detail: "explicit text search",
+            insertText: "search(\"${1:terms}\")",
+            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+            sortText: "000001",
+            range
+          }
+        );
+      } else if (context.kind === "value") {
         const values = await fetchMatcherValueSuggestions(projectId, context.field, context.prefix || token, 50);
         suggestions.push(...values.map((item, index) => ({
           label: item.label,
@@ -291,6 +316,45 @@ function registerMatcherCompletions(monaco: any, projectId: string, grammar: Mat
       return { suggestions };
     }
   });
+}
+
+function activeFilterPrefix(line: string): { text: string } | null {
+  const filterStart = line.toLowerCase().lastIndexOf("filter(");
+  if (filterStart === -1) {
+    return null;
+  }
+  const bodyStart = filterStart + "filter(".length;
+  let depth = 1;
+  let quote: "'" | "\"" | null = null;
+  let escaped = false;
+  for (let index = bodyStart; index < line.length; index += 1) {
+    const char = line[index] ?? "";
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (char === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return null;
+      }
+    }
+  }
+  return { text: line.slice(bodyStart) };
 }
 
 function completionSortText(index: number): string {

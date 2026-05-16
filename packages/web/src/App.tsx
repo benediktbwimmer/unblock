@@ -11,7 +11,6 @@ import {
   Plus,
   PlugZap,
   RefreshCw,
-  Search,
   Tags,
   UserRound
 } from "lucide-react";
@@ -27,6 +26,7 @@ import { TagsView } from "./views/TagsView";
 import { BulkTaskDetails, CreateTaskRow, DependencyModePanel, TaskDetails, TaskNode, buildTaskTree, flattenVisibleTaskIds, getDependencyCandidateState, getSelectionRange, getSubtreeTaskIds } from "./tasks/TaskComponents";
 import { NavButton, StatusTabs } from "./components/navigation";
 import { appliedFiltersFromUiState, normalizeAppConfig, sameAppliedFilters, usePersistentUiState } from "./state/uiState";
+import { parseUnifiedQuery } from "./query/unifiedQuery";
 import {
   DEFAULT_APP_CONFIG,
   type ActivityRecord,
@@ -52,6 +52,8 @@ import {
   type UiState
 } from "./types";
 
+const EMPTY_TASKS: TaskView[] = [];
+
 function App() {
   const [tasks, setTasks] = useState<TaskView[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
@@ -67,6 +69,7 @@ function App() {
   const [identityDraft, setIdentityDraft] = useState(DEFAULT_APP_CONFIG.identity);
   const [uiState, setUiState] = usePersistentUiState(appConfig.ui.persistState);
   const [appliedFilters, setAppliedFilters] = useState<AppliedTaskFilters>(() => appliedFiltersFromUiState(uiState));
+  const [taskDataProjectId, setTaskDataProjectId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [dependencyMode, setDependencyMode] = useState<DependencyMode | null>(null);
   const [createDraft, setCreateDraft] = useState<CreateTaskDraft | null>(null);
@@ -81,21 +84,31 @@ function App() {
   const taskTreeRef = useRef<HTMLDivElement | null>(null);
   const refreshRef = useRef<((options?: RefreshOptions) => Promise<void>) | null>(null);
   const filterRefreshReadyRef = useRef(false);
+  const currentProjectIdRef = useRef(uiState.projectId);
+  const previousProjectIdRef = useRef(uiState.projectId);
   const selectionAnchorRef = useRef<string | null>(null);
   const scrollPatchRef = useRef<Record<string, number>>({});
   const scrollFrameRef = useRef<number | null>(null);
+  currentProjectIdRef.current = uiState.projectId;
 
-  const selectedTask = useMemo(() => tasks.find((task) => task.id === uiState.selectedId) ?? tasks[0] ?? null, [uiState.selectedId, tasks]);
-  const roots = useMemo(() => buildTaskTree(tasks), [tasks]);
-  const readyTasks = useMemo(() => tasks.filter((task) => task.ready), [tasks]);
+  const currentTasks = taskDataProjectId === uiState.projectId ? tasks : EMPTY_TASKS;
+  const selectedTask = useMemo(() => currentTasks.find((task) => task.id === uiState.selectedId) ?? currentTasks[0] ?? null, [uiState.selectedId, currentTasks]);
+  const roots = useMemo(() => buildTaskTree(currentTasks), [currentTasks]);
+  const readyTasks = useMemo(() => currentTasks.filter((task) => task.ready), [currentTasks]);
   const collapsedTaskIds = useMemo(() => new Set(uiState.collapsedTaskIds), [uiState.collapsedTaskIds]);
   const visibleTaskIds = useMemo(() => flattenVisibleTaskIds(roots, collapsedTaskIds), [roots, collapsedTaskIds]);
   const activeSelectedIds = useMemo(() => selectedIds.length > 0 ? selectedIds : selectedTask ? [selectedTask.id] : [], [selectedIds, selectedTask]);
   const activeSelectedIdSet = useMemo(() => new Set(activeSelectedIds), [activeSelectedIds]);
-  const selectedTasks = useMemo(() => activeSelectedIds.map((id) => tasks.find((task) => task.id === id)).filter((task): task is TaskView => Boolean(task)), [activeSelectedIds, tasks]);
+  const selectedTasks = useMemo(() => activeSelectedIds.map((id) => currentTasks.find((task) => task.id === id)).filter((task): task is TaskView => Boolean(task)), [activeSelectedIds, currentTasks]);
   const detailTask = selectedIds.length === 1 ? selectedTasks[0] ?? selectedTask : selectedTask;
   const activeProjects = useMemo(() => projects.filter((project) => !project.archivedAt), [projects]);
   const selectedProject = useMemo(() => projects.find((project) => project.id === uiState.projectId) ?? null, [projects, uiState.projectId]);
+  const draftTaskQuery = useMemo(() => parseUnifiedQuery(uiState.query), [uiState.query]);
+  const taskQueryDirty = draftTaskQuery.errors.length > 0 || !sameAppliedFilters(appliedFilters, {
+    statusFilters: uiState.statusFilters,
+    search: draftTaskQuery.search,
+    matcher: draftTaskQuery.filter
+  });
   const commentsFocusNonce = detailTask && commentsFocusTarget?.taskId === detailTask.id ? commentsFocusTarget.nonce : 0;
 
   const updateUiState = useCallback((update: Partial<UiState> | ((current: UiState) => UiState)) => {
@@ -144,22 +157,47 @@ function App() {
   }, [activeProjects, projects, uiState.projectId, updateUiState]);
 
   useEffect(() => {
+    if (previousProjectIdRef.current === uiState.projectId) {
+      return;
+    }
+    previousProjectIdRef.current = uiState.projectId;
+    setTaskDataProjectId(null);
+    setTasks([]);
+    setTracks([]);
+    setTags([]);
+    setInstructions([]);
+    setSavedViews([]);
+    setQueueFeeds([]);
+    setActivity([]);
+    setCoverage([]);
+    setExplanation(null);
+    setComments([]);
+    setCommentDraft("");
+    setCommentsFocusTarget(null);
+    setError(null);
     setSelectedIds([]);
     setDependencyMode(null);
     setCreateDraft(null);
     selectionAnchorRef.current = null;
-  }, [uiState.projectId]);
+    updateUiState((current) => current.selectedId === null && current.collapsedTaskIds.length === 0
+      ? current
+      : { ...current, selectedId: null, collapsedTaskIds: [] });
+  }, [uiState.projectId, updateUiState]);
 
   useEffect(() => {
-    const taskIds = new Set(tasks.map((task) => task.id));
-    setSelectedIds((current) => current.filter((id) => taskIds.has(id)));
+    const taskIds = new Set(currentTasks.map((task) => task.id));
+    setSelectedIds((current) => {
+      const next = current.filter((id) => taskIds.has(id));
+      return next.length === current.length ? current : next;
+    });
     if (dependencyMode && dependencyMode.targetIds.some((id) => !taskIds.has(id))) {
       setDependencyMode(null);
     }
-  }, [tasks, dependencyMode]);
+  }, [currentTasks, dependencyMode]);
 
   const refresh = useCallback(async (options: RefreshOptions = {}) => {
-    if (projects.length > 0 && !projects.some((project) => project.id === uiState.projectId && !project.archivedAt)) {
+    const requestProjectId = uiState.projectId;
+    if (projects.length === 0 || !projects.some((project) => project.id === requestProjectId && !project.archivedAt)) {
       return;
     }
     if (!options.silent) {
@@ -168,7 +206,7 @@ function App() {
     setError(null);
     try {
       const params = new URLSearchParams();
-      params.set("projectId", uiState.projectId);
+      params.set("projectId", requestProjectId);
       params.set("sort", "dependency");
       const useTaskFilters = uiState.mode === "tasks";
       if (useTaskFilters && appliedFilters.search) {
@@ -185,18 +223,22 @@ function App() {
       }
       const [taskData, trackData, tagData, instructionData, viewData, feedData, activityData, coverageData] = await Promise.all([
         fetchJson<TaskView[]>(`/api/tasks?${params.toString()}`),
-        fetchJson<TrackRecord[]>(withProject("/api/tracks", uiState.projectId)),
-        fetchJson<TagRecord[]>(withProject("/api/tags", uiState.projectId)),
-        fetchJson<InstructionRecord[]>(withProject("/api/instructions?includeArchived=true", uiState.projectId)),
-        fetchJson<SavedViewRecord[]>(withProject("/api/views", uiState.projectId)),
-        fetchJson<QueueFeedRecord[]>(withProject("/api/feeds", uiState.projectId)),
-        fetchJson<ActivityRecord[]>(withProject("/api/activity?limit=200", uiState.projectId)),
-        fetchJson<SourceCoverage[]>(withProject("/api/source-coverage", uiState.projectId))
+        fetchJson<TrackRecord[]>(withProject("/api/tracks", requestProjectId)),
+        fetchJson<TagRecord[]>(withProject("/api/tags", requestProjectId)),
+        fetchJson<InstructionRecord[]>(withProject("/api/instructions?includeArchived=true", requestProjectId)),
+        fetchJson<SavedViewRecord[]>(withProject("/api/views", requestProjectId)),
+        fetchJson<QueueFeedRecord[]>(withProject("/api/feeds", requestProjectId)),
+        fetchJson<ActivityRecord[]>(withProject("/api/activity?limit=200", requestProjectId)),
+        fetchJson<SourceCoverage[]>(withProject("/api/source-coverage", requestProjectId))
       ]);
+      if (currentProjectIdRef.current !== requestProjectId) {
+        return;
+      }
       const visibleTaskData = useTaskFilters
         ? taskData.filter((task) => appliedFilters.statusFilters.includes(task.computedStatus))
         : taskData;
       setTasks(visibleTaskData);
+      setTaskDataProjectId(requestProjectId);
       setTracks(trackData);
       setTags(tagData);
       setInstructions(instructionData);
@@ -212,9 +254,11 @@ function App() {
       }));
       setDataVersion((version) => version + 1);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      if (currentProjectIdRef.current === requestProjectId) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      }
     } finally {
-      if (!options.silent) {
+      if (currentProjectIdRef.current === requestProjectId && !options.silent) {
         setLoading(false);
       }
     }
@@ -237,14 +281,6 @@ function App() {
     }
     void refresh({ silent: false });
   }, [refresh]);
-
-  useEffect(() => {
-    const timeout = window.setTimeout(() => {
-      const nextSearch = uiState.search.trim();
-      setAppliedFilters((current) => sameAppliedFilters(current, { ...current, search: nextSearch }) ? current : { ...current, search: nextSearch });
-    }, 350);
-    return () => window.clearTimeout(timeout);
-  }, [uiState.search]);
 
   useEffect(() => {
     const intervalMs = appConfig.ui.refreshIntervalMs;
@@ -357,14 +393,14 @@ function App() {
   }
 
   function selectSubtree(taskId: string) {
-    const subtreeIds = getSubtreeTaskIds(taskId, tasks);
+    const subtreeIds = getSubtreeTaskIds(taskId, currentTasks);
     selectionAnchorRef.current = taskId;
     setSelectedIds(subtreeIds);
     updateUiState({ selectedId: taskId });
   }
 
   function selectDisplayedTasks() {
-    const ids = tasks.map((task) => task.id);
+    const ids = currentTasks.map((task) => task.id);
     setSelectedIds(ids);
     if (ids[0]) {
       selectionAnchorRef.current = ids[0];
@@ -629,14 +665,14 @@ function App() {
   }
 
   async function startDependencyMode(targetIds: string[]) {
-    const uniqueTargetIds = [...new Set(targetIds)].filter((id) => tasks.some((task) => task.id === id));
+    const uniqueTargetIds = [...new Set(targetIds)].filter((id) => currentTasks.some((task) => task.id === id));
     if (uniqueTargetIds.length === 0) {
       return;
     }
     setError(null);
     setDependencyMode({ targetIds: uniqueTargetIds, draftByTaskId: {}, dependencyMap: {}, loading: true });
     try {
-      const explanations = await Promise.all(tasks.map((task) => fetchJson<Explanation>(withProject(`/api/tasks/${task.id}/explain`, uiState.projectId))));
+      const explanations = await Promise.all(currentTasks.map((task) => fetchJson<Explanation>(withProject(`/api/tasks/${task.id}/explain`, uiState.projectId))));
       const dependencyMap = Object.fromEntries(explanations.map((item) => [item.task.id, item.dependencies.map((dependency) => dependency.id)]));
       const draftByTaskId = Object.fromEntries(uniqueTargetIds.map((id) => [id, [...(dependencyMap[id] ?? [])]]));
       setDependencyMode({ targetIds: uniqueTargetIds, draftByTaskId, dependencyMap, loading: false });
@@ -651,7 +687,7 @@ function App() {
       if (!current || current.loading) {
         return current;
       }
-      const state = getDependencyCandidateState(candidateId, current, tasks);
+      const state = getDependencyCandidateState(candidateId, current, currentTasks);
       if (state.disabled) {
         return current;
       }
@@ -686,8 +722,11 @@ function App() {
   }
 
   async function saveCurrentMatcherAsView() {
-    const query = uiState.matcher.trim();
-    if (!query) {
+    if (draftTaskQuery.errors.length > 0) {
+      setError(draftTaskQuery.errors.join(" "));
+      return;
+    }
+    if (!draftTaskQuery.filter) {
       return;
     }
     const name = window.prompt("Saved view name");
@@ -697,7 +736,7 @@ function App() {
     await runMutation(async () => {
       const saved = await mutateJson<SavedViewRecord>(withProject("/api/views", uiState.projectId), {
         method: "POST",
-        body: { name: name.trim(), query }
+        body: { name: name.trim(), query: draftTaskQuery.filter }
       });
       updateUiState({ selectedViewId: saved.id });
       await refresh();
@@ -710,21 +749,21 @@ function App() {
       : [...uiState.statusFilters, status];
     const nextFilters = {
       statusFilters: nextStatuses,
-      search: uiState.search.trim(),
-      matcher: appliedFilters.matcher
+      search: draftTaskQuery.errors.length > 0 ? appliedFilters.search : draftTaskQuery.search,
+      matcher: draftTaskQuery.errors.length > 0 ? appliedFilters.matcher : draftTaskQuery.filter
     };
     updateUiState({ statusFilters: nextStatuses });
     setAppliedFilters((current) => sameAppliedFilters(current, nextFilters) ? current : nextFilters);
   }
 
-  function applySearchNow() {
-    const nextSearch = uiState.search.trim();
-    setAppliedFilters((current) => sameAppliedFilters(current, { ...current, search: nextSearch }) ? current : { ...current, search: nextSearch });
-  }
-
-  function applyMatcherNow() {
-    const nextMatcher = uiState.matcher.trim();
-    setAppliedFilters((current) => sameAppliedFilters(current, { ...current, matcher: nextMatcher }) ? current : { ...current, matcher: nextMatcher });
+  function applyQueryNow() {
+    if (draftTaskQuery.errors.length > 0) {
+      setError(draftTaskQuery.errors.join(" "));
+      return;
+    }
+    setError(null);
+    const nextFilters = { statusFilters: uiState.statusFilters, search: draftTaskQuery.search, matcher: draftTaskQuery.filter };
+    setAppliedFilters((current) => sameAppliedFilters(current, nextFilters) ? current : nextFilters);
   }
 
   function showMatcherSuggestions() {
@@ -733,10 +772,11 @@ function App() {
 
   function applySavedView(viewId: string) {
     const selected = savedViews.find((view) => view.id === viewId);
-    const matcher = selected?.query ?? "";
-    updateUiState({ selectedViewId: viewId, matcher });
+    const query = selected ? `filter(${selected.query})` : "";
+    const parsed = parseUnifiedQuery(query);
+    updateUiState({ selectedViewId: viewId, query });
     setAppliedFilters((current) => {
-      const next = { ...current, matcher };
+      const next = { ...current, search: parsed.search, matcher: parsed.filter };
       return sameAppliedFilters(current, next) ? current : next;
     });
   }
@@ -795,7 +835,7 @@ function App() {
             <span className="label">ready</span>
           </div>
           <div>
-            <span className="metric">{tasks.reduce((sum, task) => sum + (task.blocked ? 1 : 0), 0)}</span>
+            <span className="metric">{currentTasks.reduce((sum, task) => sum + (task.blocked ? 1 : 0), 0)}</span>
             <span className="label">blocked</span>
           </div>
         </div>
@@ -805,36 +845,31 @@ function App() {
         {uiState.mode === "tasks" ? (
           <header className="toolbar">
             <div className="toolbar-main-row">
-              <div className="search-wrap">
-                <Search size={17} />
-                <input value={uiState.search} onChange={(event) => updateUiState({ search: event.target.value })} onKeyDown={(event) => event.key === "Enter" && applySearchNow()} placeholder="Search tasks, assignees, tags, docs" />
+              <div className={taskQueryDirty ? "top-matcher unified-query dirty" : "top-matcher unified-query"}>
+                <button className="matcher-icon-button" onClick={showMatcherSuggestions} title="Show query suggestions"><Filter size={17} /></button>
+                <TopMatcherEditor
+                  value={uiState.query}
+                  projectId={uiState.projectId}
+                  grammar={matcherGrammar}
+                  suggestSignal={matcherSuggestTick}
+                  variant="query"
+                  onChange={(query) => updateUiState({ query, selectedViewId: "" })}
+                  onApply={applyQueryNow}
+                />
+                {!uiState.query ? <span className="matcher-placeholder">Search tasks or use filter(status = ready)</span> : null}
               </div>
+              <span className="shortcut-hint matcher-shortcut"><kbd>Shift</kbd> + <kbd>Enter</kbd></span>
+              <button className="primary-button" disabled={!taskQueryDirty} onClick={applyQueryNow}><Check size={16} /> Apply</button>
+              <select value={uiState.selectedViewId} onChange={(event) => applySavedView(event.target.value)} title="Saved view">
+                <option value="">Saved view</option>
+                {savedViews.filter((view) => !view.archivedAt).map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}
+              </select>
+              <button disabled={draftTaskQuery.errors.length > 0 || !draftTaskQuery.filter || !identityReady} onClick={() => void saveCurrentMatcherAsView()} title="Save filter as view"><Plus size={16} /> View</button>
               <StatusTabs
                 value={uiState.statusFilters}
                 onChange={toggleStatusFilter}
               />
               <button className="icon-button" onClick={() => void refresh()} title="Refresh"><RefreshCw size={17} /></button>
-            </div>
-            <div className="toolbar-matcher-row">
-              <div className={uiState.matcher.trim() !== appliedFilters.matcher ? "top-matcher dirty" : "top-matcher"}>
-                <button className="matcher-icon-button" onClick={showMatcherSuggestions} title="Show matcher suggestions"><Filter size={17} /></button>
-                <TopMatcherEditor
-                  value={uiState.matcher}
-                  projectId={uiState.projectId}
-                  grammar={matcherGrammar}
-                  suggestSignal={matcherSuggestTick}
-                  onChange={(matcher) => updateUiState({ matcher, selectedViewId: "" })}
-                  onApply={applyMatcherNow}
-                />
-                {!uiState.matcher ? <span className="matcher-placeholder">tag = backend and status = ready</span> : null}
-              </div>
-              <span className="shortcut-hint matcher-shortcut"><kbd>Shift</kbd> + <kbd>Enter</kbd></span>
-              <button className="primary-button" disabled={uiState.matcher.trim() === appliedFilters.matcher} onClick={applyMatcherNow}><Check size={16} /> Apply</button>
-              <select value={uiState.selectedViewId} onChange={(event) => applySavedView(event.target.value)} title="Saved view">
-                <option value="">Saved view</option>
-                {savedViews.filter((view) => !view.archivedAt).map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}
-              </select>
-              <button disabled={!uiState.matcher.trim() || !identityReady} onClick={() => void saveCurrentMatcherAsView()} title="Save matcher as view"><Plus size={16} /> View</button>
             </div>
           </header>
         ) : null}
@@ -854,9 +889,9 @@ function App() {
                   <p>Default order ranks ready work by downstream tasks unblocked, then priority and graph depth.</p>
                 </div>
                 <div className="panel-heading-actions">
-                  <button disabled={tasks.length === 0} onClick={selectDisplayedTasks}><ListChecks size={16} /> Select displayed</button>
+                  <button disabled={currentTasks.length === 0} onClick={selectDisplayedTasks}><ListChecks size={16} /> Select displayed</button>
                   <button onClick={() => startCreateTask(null)}><Plus size={16} /> New root task</button>
-                  <button className="icon-button" onClick={showMatcherSuggestions} title="Show matcher suggestions"><Filter size={18} /></button>
+                  <button className="icon-button" onClick={showMatcherSuggestions} title="Show query suggestions"><Filter size={18} /></button>
                 </div>
               </div>
               <div className="task-list-header">
@@ -885,7 +920,7 @@ function App() {
                     collapsedTaskIds={collapsedTaskIds}
                     dependencyMode={dependencyMode}
                     createDraft={createDraft}
-                    tasks={tasks}
+                    tasks={currentTasks}
                     onSelect={selectTask}
                     onSelectSubtree={selectSubtree}
                     onStartCreateSubtask={startCreateTask}
@@ -902,7 +937,7 @@ function App() {
             {dependencyMode ? (
               <DependencyModePanel
                 mode={dependencyMode}
-                tasks={tasks}
+                tasks={currentTasks}
                 onSave={() => void saveDependencyMode()}
                 onCancel={() => setDependencyMode(null)}
               />
@@ -950,11 +985,11 @@ function App() {
         ) : null}
 
         {uiState.mode === "queues" ? (
-          <QueuesView tracks={tracks} tasks={tasks} feeds={queueFeeds} projectId={uiState.projectId} newTrack={uiState.newTrackDraft} setNewTrack={(newTrackDraft) => updateUiState({ newTrackDraft })} createTrack={() => void createTrack()} onAssign={(track, task) => void assignTask(track, task)} onOpenTask={(task) => openTask(task.id)} />
+          <QueuesView tracks={tracks} tasks={currentTasks} feeds={queueFeeds} projectId={uiState.projectId} newTrack={uiState.newTrackDraft} setNewTrack={(newTrackDraft) => updateUiState({ newTrackDraft })} createTrack={() => void createTrack()} onAssign={(track, task) => void assignTask(track, task)} onOpenTask={(task) => openTask(task.id)} />
         ) : null}
 
         {uiState.mode === "tags" ? (
-          <TagsView tags={tags} tasks={tasks} newTag={uiState.newTagDraft} setNewTag={(newTagDraft) => updateUiState({ newTagDraft })} createTag={() => void createTag()} />
+          <TagsView tags={tags} tasks={currentTasks} newTag={uiState.newTagDraft} setNewTag={(newTagDraft) => updateUiState({ newTagDraft })} createTag={() => void createTag()} />
         ) : null}
 
         {uiState.mode === "instructions" ? (
@@ -963,7 +998,7 @@ function App() {
             projectId={uiState.projectId}
             instructions={instructions}
             grammar={matcherGrammar}
-            tasks={tasks}
+            tasks={currentTasks}
             onRefresh={() => refresh({ silent: true })}
             onOpenTask={(task) => openTask(task.id)}
           />

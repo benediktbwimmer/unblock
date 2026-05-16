@@ -73,6 +73,8 @@ describe("unblock core services", () => {
 
     await services.tasks.add({ id: "API", title: "API task" });
     await services.tasks.add({ id: "WEB", title: "Web task" });
+    await services.tasks.add({ id: "FLOW", title: "Prism Flows task" });
+    await services.tasks.add({ id: "P-DATA", title: "Data task", description: "Runs on Prism workflows" });
     await services.tags.add({ id: "UX", name: "user experience" });
     await services.tags.assign("WEB", ["UX"]);
     await services.tracks.add({ actor: "codex-b", name: "Backend queue" });
@@ -80,9 +82,13 @@ describe("unblock core services", () => {
 
     const assigned = await services.query.list({ search: "codex-b" });
     const tagged = await services.query.list({ search: "experience" });
+    const flows = await services.query.list({ search: "flows" });
+    const dataById = await services.query.list({ search: "P-DATA" });
 
     expect(assigned.map((task) => task.id)).toEqual(["API"]);
     expect(tagged.map((task) => task.id)).toEqual(["WEB"]);
+    expect(flows.map((task) => task.id)).toEqual(["FLOW"]);
+    expect(dataById.map((task) => task.id)).toEqual(["P-DATA"]);
   });
 
   it("keeps task comments flat, chronological, markdown-capable, and provenance-stamped", async () => {

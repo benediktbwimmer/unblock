@@ -2167,7 +2167,7 @@ export class QueryService {
         }
       }
       if (search) {
-        const haystack = [
+        const values = [
           task.id,
           task.title,
           task.description,
@@ -2179,14 +2179,38 @@ export class QueryService {
           task.assignedTrack?.actor,
           task.assignedTrack?.name,
           ...task.tags.flatMap((tag) => [tag.id, tag.name, tag.description])
-        ].filter(Boolean).join("\n").toLowerCase();
-        if (!haystack.includes(search)) {
+        ];
+        if (!matchesTaskSearch(values, search)) {
           return false;
         }
       }
       return true;
     });
   }
+}
+
+function matchesTaskSearch(values: Array<string | null | undefined>, search: string): boolean {
+  const searchTokens = searchTokensFor(search);
+  if (searchTokens.length === 0) {
+    return true;
+  }
+  return values.some((value) => tokenSequenceMatches(searchTokensFor(value ?? ""), searchTokens));
+}
+
+function tokenSequenceMatches(valueTokens: string[], searchTokens: string[]): boolean {
+  if (searchTokens.length > valueTokens.length) {
+    return false;
+  }
+  for (let start = 0; start <= valueTokens.length - searchTokens.length; start += 1) {
+    if (searchTokens.every((searchToken, index) => valueTokens[start + index]?.startsWith(searchToken))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function searchTokensFor(value: string): string[] {
+  return value.toLowerCase().match(/[a-z0-9]+/g) ?? [];
 }
 
 function computeRollupStatus(childrenCount: number, unfinishedDescendantsCount: number): RollupStatus {
