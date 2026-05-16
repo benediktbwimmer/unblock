@@ -47,6 +47,7 @@ export interface TaskRepository {
   list(projectId?: string): Promise<Task[]>;
   get(projectId: string, id: string): Promise<Task | null>;
   create(task: Task): Promise<void>;
+  createIfAbsent?(task: Task): Promise<boolean>;
   createMany?(tasks: Task[]): Promise<void>;
   update(task: Task): Promise<void>;
   updateWithPrevious?(previous: Task, task: Task): Promise<void>;
@@ -156,6 +157,7 @@ export interface OutboxEventRepository {
 
 export interface InboxEventRepository {
   receive(event: InboxEvent): Promise<{ event: InboxEvent; created: boolean }>;
+  receiveForApply?(event: InboxEvent): Promise<{ event: InboxEvent; created: boolean; claimed: boolean }>;
   get(id: string): Promise<InboxEvent | null>;
   findBySource(source: string, externalEventId: string): Promise<InboxEvent | null>;
   markApplying(id: string): Promise<InboxEvent | null>;

@@ -1,7 +1,7 @@
-import { validation } from "./errors.js";
+import { UnblockError, validation } from "./errors.js";
 import { createServices } from "./services.js";
 import type { AppStore, InboxEventRepository, OutboxEventRepository } from "./store.js";
-import { nowIso, type InboxEvent, type OutboxEvent } from "./types.js";
+import { nowIso, type EditTaskInput, type InboxEvent, type OutboxEvent } from "./types.js";
 import { githubIssueMappingInputSchema, upsertGitHubIssueMapping } from "./github-connector.js";
 import {
   connectorEventSchema,
@@ -180,12 +180,14 @@ export async function applyConnectorInboxEvent(
 ): Promise<ConnectorInboxApplyResult> {
   const inbox = requireInbox(store.inbox);
   const event = connectorEventSchema.parse(eventInput);
-  const received = await inbox.receive(inboxEventForConnector(event, options.source ?? "prism-flows"));
+  const inboxEvent = inboxEventForConnector(event, options.source ?? "prism-flows");
+  const received = inbox.receiveForApply
+    ? await inbox.receiveForApply(inboxEvent)
+    : await receiveAndMarkApplying(inbox, inboxEvent);
   if (!received.created) {
     return { inboxEvent: received.event, applied: false, duplicate: true, evidence: { duplicateOf: received.event.id } };
   }
-  const applying = await inbox.markApplying(received.event.id);
-  if (!applying) {
+  if (!received.claimed) {
     return { inboxEvent: received.event, applied: false, duplicate: true, evidence: { alreadyApplying: true } };
   }
 
@@ -203,6 +205,21 @@ export async function applyConnectorInboxEvent(
   }
 }
 
+async function receiveAndMarkApplying(
+  inbox: InboxEventRepository,
+  event: InboxEvent
+): Promise<{ event: InboxEvent; created: boolean; claimed: boolean }> {
+  const received = await inbox.receive(event);
+  if (!received.created) {
+    return { ...received, claimed: false };
+  }
+  const applying = await inbox.markApplying(received.event.id);
+  if (!applying) {
+    return { event: received.event, created: true, claimed: false };
+  }
+  return { event: applying, created: true, claimed: true };
+}
+
 async function applyConnectorEventToStore(
   store: AppStore,
   event: ConnectorEvent,
@@ -212,30 +229,37 @@ async function applyConnectorEventToStore(
   if (event.kind === "connector.inbound.task_upserted") {
     if (!event.task) validation("connector.inbound.task_upserted requires task payload.");
     const mapping = await persistConnectorMapping(store, event);
-    const existing = await store.tasks.get(event.scope.projectId, event.task.id);
-    if (existing) {
-      const updated = await services.tasks.edit(event.task.id, {
+    try {
+      const created = await services.tasks.add({
+        id: event.task.id,
         title: event.task.title,
         description: event.task.description,
         lifecycle: event.task.lifecycle,
         priority: event.task.priority,
-        sourceDoc: event.external?.url ?? event.task.sourceUrl ?? existing.sourceDoc,
-        sourceSection: event.external ? `${event.external.system}:${event.external.kind}` : existing.sourceSection,
-        sourceAnchor: event.external?.id ?? existing.sourceAnchor
+        sourceDoc: event.external?.url ?? event.task.sourceUrl ?? null,
+        sourceSection: event.external ? `${event.external.system}:${event.external.kind}` : null,
+        sourceAnchor: event.external?.id ?? null
       });
+      return { action: "task.created", taskId: created.id, external: event.external ?? null, mapping };
+    } catch (error) {
+      if (!(error instanceof UnblockError) || error.code !== "conflict") {
+        throw error;
+      }
+      const taskUpdate: EditTaskInput = {
+        title: event.task.title,
+        description: event.task.description,
+        lifecycle: event.task.lifecycle,
+        priority: event.task.priority
+      };
+      const sourceDoc = event.external?.url ?? event.task.sourceUrl;
+      if (sourceDoc !== undefined) taskUpdate.sourceDoc = sourceDoc;
+      if (event.external) {
+        taskUpdate.sourceSection = `${event.external.system}:${event.external.kind}`;
+      }
+      if (event.external?.id) taskUpdate.sourceAnchor = event.external.id;
+      const updated = await services.tasks.edit(event.task.id, taskUpdate);
       return { action: "task.updated", taskId: updated.id, external: event.external ?? null, mapping };
     }
-    const created = await services.tasks.add({
-      id: event.task.id,
-      title: event.task.title,
-      description: event.task.description,
-      lifecycle: event.task.lifecycle,
-      priority: event.task.priority,
-      sourceDoc: event.external?.url ?? event.task.sourceUrl ?? null,
-      sourceSection: event.external ? `${event.external.system}:${event.external.kind}` : null,
-      sourceAnchor: event.external?.id ?? null
-    });
-    return { action: "task.created", taskId: created.id, external: event.external ?? null, mapping };
   }
 
   if (event.kind === "connector.inbound.task_archived") {

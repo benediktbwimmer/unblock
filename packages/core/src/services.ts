@@ -302,12 +302,22 @@ export class TaskService {
     };
 
     await this.store.transaction(async (repos) => {
-      if (await repos.tasks.get(this.projectId, task.id)) {
-        conflict(`Task already exists: ${task.id}`);
+      let parent: Task | null = null;
+      if (!repos.tasks.createIfAbsent || task.parentTaskId) {
+        if (await repos.tasks.get(this.projectId, task.id)) {
+          conflict(`Task already exists: ${task.id}`);
+        }
+        parent = await ensureParentTask(repos, this.projectId, task.id, task.parentTaskId);
       }
-      const parent = await ensureParentTask(repos, this.projectId, task.id, task.parentTaskId);
       ensureFinishedParentDoesNotContainUnfinishedChild(parent, task);
-      await repos.tasks.create(task);
+      if (repos.tasks.createIfAbsent && !task.parentTaskId) {
+        const created = await repos.tasks.createIfAbsent(task);
+        if (!created) {
+          conflict(`Task already exists: ${task.id}`);
+        }
+      } else {
+        await repos.tasks.create(task);
+      }
       await repos.activity.append(this.activity.make(this.projectId, "task.created", "task", task.id, `Created ${task.id}`, { title: task.title }));
     });
 

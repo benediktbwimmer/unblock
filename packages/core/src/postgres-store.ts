@@ -830,6 +830,24 @@ class PostgresTaskRepository implements TaskRepository {
     );
   }
 
+  async createIfAbsent(task: Task): Promise<boolean> {
+    const result = await this.db.query(
+      `
+      insert into tasks (
+        tenant_id, project_id, id, parent_task_id, title, description, lifecycle, priority, size, source_doc, source_section,
+        source_anchor, source_line, source_text, completion_bar, created_at, updated_at,
+        started_at, finished_at, archived_at, version
+      ) values (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+      )
+      on conflict (tenant_id, project_id, id) do nothing
+    `,
+      taskParams(this.tenantId, task),
+    );
+    return result.rowCount === 1;
+  }
+
   async createMany(tasks: Task[]): Promise<void> {
     for (const chunk of chunks(tasks, 500)) {
       if (chunk.length === 0) continue;
@@ -1824,6 +1842,48 @@ class PostgresInboxEventRepository implements InboxEventRepository {
     return {
       event: inboxEventFromRow(result.rows[0]),
       created: result.rows[0].inserted === true,
+    };
+  }
+
+  async receiveForApply(
+    event: InboxEvent,
+  ): Promise<{ event: InboxEvent; created: boolean; claimed: boolean }> {
+    const result = await this.db.query(
+      `
+      with inserted as (
+        insert into inbox_events (
+          tenant_id, project_id, id, source, external_event_id, event_type, payload_json,
+          status, applied_at, created_at, error_json, evidence_json
+        )
+        values ($1, $2, $3, $4, $5, $6, $7::jsonb, 'applying', null, $8, $9::jsonb, $10::jsonb)
+        on conflict (tenant_id, source, external_event_id) do nothing
+        returning *, true as inserted
+      )
+      select * from inserted
+      union all
+      select inbox_events.*, false as inserted
+      from inbox_events
+      where tenant_id = $1 and source = $4 and external_event_id = $5 and not exists (select 1 from inserted)
+      limit 1
+    `,
+      [
+        this.tenantId,
+        event.projectId,
+        event.id,
+        event.source,
+        event.externalEventId,
+        event.eventType,
+        JSON.stringify(event.payload),
+        event.createdAt,
+        JSON.stringify(event.error),
+        JSON.stringify(event.evidence),
+      ],
+    );
+    const created = result.rows[0].inserted === true;
+    return {
+      event: inboxEventFromRow(result.rows[0]),
+      created,
+      claimed: created,
     };
   }
 

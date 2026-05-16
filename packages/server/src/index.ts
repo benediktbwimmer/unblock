@@ -37,6 +37,7 @@ import {
   updateUnblockConfig,
   type ComputedStatus,
   type AppStore,
+  type ConnectorEvent,
   withAdditionalHostedRoles,
   type Lifecycle,
   type Priority,
@@ -59,6 +60,8 @@ import {
 
 export type UnblockBackend = "sqlite" | "postgres" | "hosted" | "prism";
 
+const defaultConnectorObservationTtlMs = 1_000;
+
 export interface ServerOptions {
   backend?: UnblockBackend | undefined;
   databasePath?: string | undefined;
@@ -76,6 +79,7 @@ type SharedPostgresRuntime = {
 export function createApp(options: ServerOptions = {}) {
   const app = new Hono();
   const postgresRuntimes = new Map<string, SharedPostgresRuntime>();
+  const connectorObservationNextAt = new Map<string, number>();
   app.use("*", cors());
 
   app.get("/api/health", async (c) => c.json({
@@ -347,7 +351,7 @@ export function createApp(options: ServerOptions = {}) {
     const event = connectorEventSchema.parse(await c.req.json());
     await authorizeHosted(c, event.scope.projectId);
     const result = await applyConnectorInboxEvent(c.get("store"), event, { source: "prism-flows" });
-    const observation = result.applied
+    const observation = result.applied && shouldObserveSuccessfulConnectorInboxEvent(event, connectorObservationNextAt)
       ? await observeConnectorInboxEvent(c.get("store"), event, { evidence: result.evidence })
       : null;
     return c.json({ ...result, observation });
@@ -360,7 +364,7 @@ export function createApp(options: ServerOptions = {}) {
     for (const event of events) {
       await authorizeHosted(c, event.scope.projectId);
       const result = await applyConnectorInboxEvent(c.get("store"), event, { source: "prism-flows" });
-      const observation = result.applied
+      const observation = result.applied && shouldObserveSuccessfulConnectorInboxEvent(event, connectorObservationNextAt)
         ? await observeConnectorInboxEvent(c.get("store"), event, { evidence: result.evidence })
         : null;
       results.push({ ...result, observation });
@@ -825,6 +829,40 @@ function positiveIntegerEnv(name: string): number | undefined {
   if (!raw) return undefined;
   const value = Number(raw);
   return Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function shouldObserveSuccessfulConnectorInboxEvent(
+  event: ConnectorEvent,
+  connectorObservationNextAt: Map<string, number>,
+  now = Date.now()
+): boolean {
+  if (event.kind !== "connector.inbound.task_upserted") {
+    return true;
+  }
+  const ttlMs = nonNegativeIntegerEnv("UNBLOCK_CONNECTOR_OBSERVATION_TTL_MS") ?? defaultConnectorObservationTtlMs;
+  if (ttlMs === 0) {
+    return true;
+  }
+  const key = [
+    event.scope.tenantId,
+    event.scope.projectId,
+    event.scope.connectionId,
+    event.scope.provider,
+    event.kind
+  ].join(":");
+  const nextAt = connectorObservationNextAt.get(key) ?? 0;
+  if (nextAt > now) {
+    return false;
+  }
+  connectorObservationNextAt.set(key, now + ttlMs);
+  return true;
+}
+
+function nonNegativeIntegerEnv(name: string): number | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 async function hostedContextForRequest(c: Context, options: ServerOptions, id: string): Promise<HostedRequestContext | null> {

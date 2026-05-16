@@ -363,6 +363,45 @@ describe("hosted authorization", () => {
     });
   });
 
+  it("throttles burst task-upsert connector success observations", async () => {
+    const store = await seededStore();
+    installConnectorState(store);
+    const app = createApp({ backend: "hosted", storeFactory: () => store, hostedAuth });
+
+    for (const issueNumber of [100, 101]) {
+      const event = connectorEvent({
+        kind: "connector.inbound.task_upserted",
+        scope: { tenantId: "ORG_HOSTED", projectId: "HOSTED", connectionId: "github-main", provider: "github" },
+        external: {
+          system: "github",
+          kind: "issue",
+          id: String(issueNumber),
+          url: `https://github.com/acme/repo/issues/${issueNumber}`
+        },
+        task: {
+          id: `GH-${issueNumber}`,
+          title: `Imported GitHub issue ${issueNumber}`,
+          description: "",
+          lifecycle: "open",
+          priority: 2
+        },
+        evidence: {}
+      });
+
+      const applied = await app.request("/api/connectors/inbox", {
+        method: "POST",
+        headers: { ...hostedHeaders("connector_admin"), "content-type": "application/json" },
+        body: JSON.stringify(event)
+      });
+      expect(applied.status).toBe(200);
+      await expect(applied.json()).resolves.toMatchObject({ applied: true, duplicate: false });
+    }
+
+    await expect(store.tasks.get("HOSTED", "GH-100")).resolves.toMatchObject({ title: "Imported GitHub issue 100" });
+    await expect(store.tasks.get("HOSTED", "GH-101")).resolves.toMatchObject({ title: "Imported GitHub issue 101" });
+    expect((store.connectors as FakeConnectors).runs).toHaveLength(1);
+  });
+
   it("returns hosted operational headers and tenant metrics", async () => {
     const store = await seededStore();
     const app = createApp({ backend: "hosted", storeFactory: () => store, hostedAuth });
