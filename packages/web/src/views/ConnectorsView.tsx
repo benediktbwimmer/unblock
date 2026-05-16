@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Pause, Play, PlugZap, Trash2 } from "lucide-react";
+import { Check, Pause, Play, PlugZap, RotateCcw, Trash2, X } from "lucide-react";
 import { fetchJson, mutateJson, withProject } from "../api";
-import type { GitHubConnectionRecord } from "../types";
+import type { ConnectorSyncQueueItemRecord, ConnectorSyncQueueItemStatus, GitHubConnectionRecord } from "../types";
 
 interface Draft {
   connectionId: string;
@@ -25,13 +25,23 @@ const emptyDraft: Draft = {
 
 export function ConnectorsView({ projectId, onError }: { projectId: string; onError: (message: string | null) => void }) {
   const [connections, setConnections] = useState<GitHubConnectionRecord[]>([]);
+  const [queueItems, setQueueItems] = useState<ConnectorSyncQueueItemRecord[]>([]);
+  const [queueStatus, setQueueStatus] = useState<ConnectorSyncQueueItemStatus | "all">("all");
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [loading, setLoading] = useState(false);
 
   async function load() {
     setLoading(true);
     try {
-      setConnections(await fetchJson<GitHubConnectionRecord[]>(withProject("/api/connectors/github/connections", projectId)));
+      const queuePath = queueStatus === "all"
+        ? withProject("/api/connectors/sync-queue", projectId)
+        : `${withProject("/api/connectors/sync-queue", projectId)}&status=${encodeURIComponent(queueStatus)}`;
+      const [nextConnections, nextQueue] = await Promise.all([
+        fetchJson<GitHubConnectionRecord[]>(withProject("/api/connectors/github/connections", projectId)),
+        fetchJson<ConnectorSyncQueueItemRecord[]>(queuePath)
+      ]);
+      setConnections(nextConnections);
+      setQueueItems(nextQueue);
       onError(null);
     } catch (reason) {
       onError(reason instanceof Error ? reason.message : String(reason));
@@ -42,7 +52,7 @@ export function ConnectorsView({ projectId, onError }: { projectId: string; onEr
 
   useEffect(() => {
     void load();
-  }, [projectId]);
+  }, [projectId, queueStatus]);
 
   async function createConnection() {
     await mutateConnector(async () => {
@@ -70,6 +80,22 @@ export function ConnectorsView({ projectId, onError }: { projectId: string; onEr
         ? withProject(`/api/connectors/github/connections/${connection.id}`, projectId)
         : withProject(`/api/connectors/github/connections/${connection.id}/${action}`, projectId);
       await mutateJson<GitHubConnectionRecord>(path, { method: action === "delete" ? "DELETE" : "POST" });
+      await load();
+    });
+  }
+
+  async function updateQueueItem(item: ConnectorSyncQueueItemRecord, status: ConnectorSyncQueueItemStatus) {
+    await mutateConnector(async () => {
+      await mutateJson<ConnectorSyncQueueItemRecord>(
+        withProject(`/api/connectors/sync-queue/${item.id}/status`, projectId),
+        {
+          method: "POST",
+          body: {
+            status,
+            resolvedAt: ["ignored", "resolved"].includes(status) ? new Date().toISOString() : null
+          }
+        }
+      );
       await load();
     });
   }
@@ -138,6 +164,77 @@ export function ConnectorsView({ projectId, onError }: { projectId: string; onEr
           {connections.length === 0 ? <p className="muted">{loading ? "Loading connector state..." : "No GitHub installations configured."}</p> : null}
         </div>
       </div>
+
+      <div className="sync-queue-panel">
+        <div className="sync-queue-toolbar">
+          <div>
+            <h2>Sync Queue</h2>
+            <p>{queueItems.length} visible divergence{queueItems.length === 1 ? "" : "s"}</p>
+          </div>
+          <select value={queueStatus} onChange={(event) => setQueueStatus(event.target.value as ConnectorSyncQueueItemStatus | "all")}>
+            <option value="all">All</option>
+            <option value="pending">Pending</option>
+            <option value="auto_applying">Auto applying</option>
+            <option value="manual_review">Manual review</option>
+            <option value="blocked">Blocked</option>
+            <option value="failed">Failed</option>
+            <option value="ignored">Ignored</option>
+            <option value="resolved">Resolved</option>
+          </select>
+        </div>
+
+        <div className="sync-queue-list">
+          {queueItems.map((item) => (
+            <div className={`sync-queue-row severity-${item.severity}`} key={item.id}>
+              <div className="sync-queue-main">
+                <div className="sync-queue-title">
+                  <h3>{item.localKind}:{item.localId}</h3>
+                  <span>{item.status}</span>
+                  <span>{item.decision.kind}</span>
+                </div>
+                <p>{item.connectionId} · {item.externalKind}:{item.externalId} · {item.diff.field}</p>
+                <div className="sync-queue-diff">
+                  <div>
+                    <strong>External</strong>
+                    <code>{formatQueueValue(item.diff.externalValue)}</code>
+                  </div>
+                  <div>
+                    <strong>Unblock</strong>
+                    <code>{formatQueueValue(item.diff.localValue)}</code>
+                  </div>
+                  <div>
+                    <strong>Policy</strong>
+                    <code>{item.policyRef.policyId ?? item.policyRef.preset}{item.policyRef.scopeQuery ? ` · ${item.policyRef.scopeQuery}` : ""}</code>
+                  </div>
+                </div>
+                <p className="sync-queue-reason">{item.decision.reason}</p>
+              </div>
+              <div className="sync-queue-actions">
+                {item.status !== "auto_applying" && item.status !== "resolved" && item.status !== "ignored" ? (
+                  <button className="icon-button" onClick={() => void updateQueueItem(item, "auto_applying")} title="Apply"><Check size={16} /></button>
+                ) : null}
+                {item.status !== "pending" && item.status !== "resolved" && item.status !== "ignored" ? (
+                  <button className="icon-button" onClick={() => void updateQueueItem(item, "pending")} title="Retry"><RotateCcw size={16} /></button>
+                ) : null}
+                {item.status !== "ignored" && item.status !== "resolved" ? (
+                  <button className="icon-button danger" onClick={() => void updateQueueItem(item, "ignored")} title="Ignore"><X size={16} /></button>
+                ) : null}
+                {item.status !== "resolved" ? (
+                  <button className="icon-button" onClick={() => void updateQueueItem(item, "resolved")} title="Resolve"><Check size={16} /></button>
+                ) : null}
+              </div>
+            </div>
+          ))}
+          {queueItems.length === 0 ? <p className="muted">{loading ? "Loading sync queue..." : "No sync queue items match the current filter."}</p> : null}
+        </div>
+      </div>
     </section>
   );
+}
+
+function formatQueueValue(value: unknown): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (typeof value === "string") return value;
+  return JSON.stringify(value);
 }

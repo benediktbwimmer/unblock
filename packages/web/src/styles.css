@@ -1345,6 +1345,122 @@ button.comment-chip:hover {
   border-color: #f3b8b3;
 }
 
+.sync-queue-panel {
+  border-top: 1px solid #dfe5ef;
+  padding: 14px;
+}
+
+.sync-queue-toolbar,
+.sync-queue-title,
+.sync-queue-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sync-queue-toolbar {
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.sync-queue-toolbar p,
+.sync-queue-row p {
+  color: #657083;
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.sync-queue-list {
+  display: grid;
+  gap: 10px;
+}
+
+.sync-queue-row {
+  border: 1px solid #dfe5ef;
+  border-left-width: 4px;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 12px;
+}
+
+.sync-queue-row.severity-info {
+  border-left-color: #4b7bec;
+}
+
+.sync-queue-row.severity-warning {
+  border-left-color: #d69200;
+}
+
+.sync-queue-row.severity-error {
+  border-left-color: #c92a2a;
+}
+
+.sync-queue-title {
+  flex-wrap: wrap;
+}
+
+.sync-queue-title span {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #dfe5ef;
+  border-radius: 999px;
+  padding: 0 8px;
+  color: #394456;
+  background: #f8fafc;
+  font-size: 12px;
+}
+
+.sync-queue-diff {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.sync-queue-diff div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.sync-queue-diff strong {
+  font-size: 12px;
+  color: #394456;
+}
+
+.sync-queue-diff code {
+  background: #f8fafc;
+  border: 1px solid #dfe5ef;
+  border-radius: 6px;
+  color: #1f2937;
+  display: block;
+  font-size: 12px;
+  line-height: 1.4;
+  max-height: 74px;
+  overflow: auto;
+  padding: 7px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sync-queue-reason {
+  max-width: 920px;
+}
+
+.sync-queue-actions {
+  align-self: start;
+}
+
+@media (max-width: 900px) {
+  .sync-queue-row,
+  .sync-queue-diff {
+    grid-template-columns: 1fr;
+  }
+}
+
 .queue-column {
   border: 1px solid #e2e6ee;
   border-radius: 8px;
