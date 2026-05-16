@@ -14,10 +14,13 @@ type Env = Record<string, string | undefined>;
 export type HarnessMode =
   | "e2e"
   | "benchmark-reconcile"
-  | "benchmark-webhook";
+  | "benchmark-webhook"
+  | "benchmark-direct-webhook";
 
 export interface HarnessOptions {
   mode: HarnessMode;
+  unblockServerMode: "dist" | "dev";
+  directWebhookClient: "node" | "deno";
   issueCount: number;
   cleanup: boolean;
   timeoutMs: number;
@@ -88,11 +91,18 @@ export function parseHarnessOptions(
     (flags.has("benchmark") ? "benchmark-reconcile" : "e2e");
   if (!isHarnessMode(mode)) {
     throw new Error(
-      `Unsupported mode ${mode}. Expected e2e, benchmark-reconcile, or benchmark-webhook.`,
+      `Unsupported mode ${mode}. Expected e2e, benchmark-reconcile, benchmark-webhook, or benchmark-direct-webhook.`,
     );
   }
   return {
     mode,
+    unblockServerMode: parseUnblockServerMode(
+      flagValue(flags, "unblock-server") ?? env.UNBLOCK_SIM_SERVER_MODE,
+    ),
+    directWebhookClient: parseDirectWebhookClient(
+      flagValue(flags, "direct-webhook-client") ??
+        env.UNBLOCK_SIM_DIRECT_WEBHOOK_CLIENT,
+    ),
     issueCount: positiveInteger(
       flagValue(flags, "issues") ?? env.UNBLOCK_SIM_ISSUES,
       1_000,
@@ -250,9 +260,25 @@ export async function runGithubSimulatorHarness(
     setEnv(commonEnv);
 
     unblock = await timed(steps, "unblock.start", async () => {
+      if (options.unblockServerMode === "dist") {
+        await timed(steps, "unblock.build", () =>
+          runCommand("npm", ["run", "build", "-w", "@unblock/server"], {
+            cwd: repoRoot(),
+            env: commonEnv,
+          }));
+      }
+      const serverCommand = options.unblockServerMode === "dist"
+        ? {
+          command: "node",
+          args: ["packages/server/dist/index.js"],
+        }
+        : {
+          command: "npm",
+          args: ["run", "dev", "-w", "@unblock/server"],
+        };
       const child = startManagedProcess({
-        command: "npm",
-        args: ["run", "dev", "-w", "@unblock/server"],
+        command: serverCommand.command,
+        args: serverCommand.args,
         cwd: repoRoot(),
         env: {
           ...commonEnv,
@@ -375,7 +401,8 @@ export async function runGithubSimulatorHarness(
         simulatorUrl: simulator.url,
         timeoutMs: options.timeoutMs,
       })
-      : await runWebhookBenchmark({
+      : options.mode === "benchmark-webhook"
+      ? await runWebhookBenchmark({
         env: smokeEnv,
         steps,
         issueCount: options.issueCount,
@@ -384,6 +411,16 @@ export async function runGithubSimulatorHarness(
         simulator,
         timeoutMs: options.timeoutMs,
         issueCreateConcurrency: options.issueCreateConcurrency,
+      })
+      : await runDirectWebhookBenchmark({
+        env: smokeEnv,
+        steps,
+        issueCount: options.issueCount,
+        owner,
+        repo,
+        timeoutMs: options.timeoutMs,
+        webhookConcurrency: options.issueCreateConcurrency,
+        client: options.directWebhookClient,
       });
     await timed(steps, "prism.stop.before_diagnostics", async () => {
       await stopLocalPrismFlowsRuntime({ outDir: runtimeDir });
@@ -549,6 +586,21 @@ async function runWebhookBenchmark(input: {
     "unblock.tasks.wait",
     () => waitForTaskCount(input.env, input.issueCount, input.timeoutMs),
   );
+  await timed(
+    input.steps,
+    "prism.effects.wait",
+    () => waitForPrismEffectResults(input.env, input.issueCount, input.timeoutMs),
+  );
+  await timed(
+    input.steps,
+    "prism.workflows.wait",
+    () =>
+      waitForPrismWorkflowCompletions(
+        input.env,
+        input.issueCount,
+        input.timeoutMs,
+      ),
+  );
   const elapsedMs = Math.round(performance.now() - started);
   return {
     issueCount: input.issueCount,
@@ -556,6 +608,160 @@ async function runWebhookBenchmark(input: {
     throughputPerSecond: perSecond(taskCount, elapsedMs),
     taskCount,
     webhookDeliveries,
+  };
+}
+
+async function runDirectWebhookBenchmark(input: {
+  env: Env;
+  steps: SmokeStep[];
+  issueCount: number;
+  owner: string;
+  repo: string;
+  timeoutMs: number;
+  webhookConcurrency: number;
+  client: "node" | "deno";
+}) {
+  const webhookUrl = required(input.env, "UNBLOCK_SMOKE_GITHUB_WEBHOOK_URL");
+  if (input.client === "node") {
+    const postResult = await timed(
+      input.steps,
+      "github.webhooks.post_direct.node",
+      () =>
+        postDirectWebhooksWithNode({
+          webhookUrl,
+          secret: WEBHOOK_SECRET,
+          projectId: required(input.env, "UNBLOCK_PROJECT_ID"),
+          owner: input.owner,
+          repo: input.repo,
+          issueCount: input.issueCount,
+          concurrency: input.webhookConcurrency,
+        }),
+    );
+    const waitStarted = performance.now();
+    const taskCount = await timed(
+      input.steps,
+      "unblock.tasks.wait",
+      () => waitForTaskCount(input.env, input.issueCount, input.timeoutMs),
+    );
+    await timed(
+      input.steps,
+      "prism.effects.wait",
+      () =>
+        waitForPrismEffectResults(input.env, input.issueCount, input.timeoutMs),
+    );
+    await timed(
+      input.steps,
+      "prism.workflows.wait",
+      () =>
+        waitForPrismWorkflowCompletions(
+          input.env,
+          input.issueCount,
+          input.timeoutMs,
+        ),
+    );
+    const elapsedMs = Math.round(
+      postResult.submitWallMs + (performance.now() - waitStarted),
+    );
+    return {
+      issueCount: input.issueCount,
+      elapsedMs,
+      throughputPerSecond: perSecond(taskCount, elapsedMs),
+      taskCount,
+      webhookDeliveries: {
+        total: postResult.total,
+        ok: postResult.ok,
+        failed: postResult.failed,
+      },
+    };
+  }
+  const requests = await Promise.all(
+    Array.from({ length: input.issueCount }, async (_item, index) => {
+      const issueNumber = index + 1;
+      return await signedGitHubWebhookRequest({
+        secret: WEBHOOK_SECRET,
+        deliveryId: `direct-${input.env.UNBLOCK_PROJECT_ID}-${issueNumber}`,
+        event: "issues",
+        body: directGitHubIssueWebhookPayload({
+          owner: input.owner,
+          repo: input.repo,
+          issueNumber,
+        }),
+      });
+    }),
+  );
+  const started = performance.now();
+  const deliveryResults = await timed(
+    input.steps,
+    "github.webhooks.post_direct",
+    async () => {
+      const results: Array<{ ok: boolean; status?: number; error?: string }> =
+        Array.from({ length: input.issueCount }, () => ({ ok: false }));
+      await mapConcurrent(
+        Array.from({ length: input.issueCount }, (_, index) => index),
+        input.webhookConcurrency,
+        async (index) => {
+          try {
+            const request = requests[index];
+            const response = await fetch(webhookUrl, {
+              method: "POST",
+              headers: request.headers,
+              body: request.body,
+            });
+            await response.body?.cancel();
+            results[index] = { ok: response.ok, status: response.status };
+          } catch (error) {
+            results[index] = {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+        },
+      );
+      const failed = results.filter((result) => !result.ok);
+      if (failed.length > 0) {
+        throw new Error(
+          `${failed.length}/${results.length} direct webhook posts failed: ${
+            failed
+              .slice(0, 3)
+              .map((result) => result.error ?? `HTTP ${result.status}`)
+              .join("; ")
+          }`,
+        );
+      }
+      return {
+        total: results.length,
+        ok: results.filter((result) => result.ok).length,
+        failed: failed.length,
+      };
+    },
+  );
+  const taskCount = await timed(
+    input.steps,
+    "unblock.tasks.wait",
+    () => waitForTaskCount(input.env, input.issueCount, input.timeoutMs),
+  );
+  await timed(
+    input.steps,
+    "prism.effects.wait",
+    () => waitForPrismEffectResults(input.env, input.issueCount, input.timeoutMs),
+  );
+  await timed(
+    input.steps,
+    "prism.workflows.wait",
+    () =>
+      waitForPrismWorkflowCompletions(
+        input.env,
+        input.issueCount,
+        input.timeoutMs,
+      ),
+  );
+  const elapsedMs = Math.round(performance.now() - started);
+  return {
+    issueCount: input.issueCount,
+    elapsedMs,
+    throughputPerSecond: perSecond(taskCount, elapsedMs),
+    taskCount,
+    webhookDeliveries: deliveryResults,
   };
 }
 
@@ -619,6 +825,230 @@ async function configureUnblock(input: {
       },
     },
   );
+}
+
+async function postDirectWebhooksWithNode(input: {
+  webhookUrl: string;
+  secret: string;
+  projectId: string;
+  owner: string;
+  repo: string;
+  issueCount: number;
+  concurrency: number;
+}): Promise<{
+  total: number;
+  ok: number;
+  failed: number;
+  submitWallMs: number;
+}> {
+  const script = String.raw`
+import { createHmac } from "node:crypto";
+const input = JSON.parse(process.argv[1]);
+function stableNumericId(value) {
+  let hash = 2166136261;
+  for (const char of value) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return Math.abs(hash);
+}
+function payload(issueNumber) {
+  const now = new Date().toISOString();
+  const fullName = input.owner + "/" + input.repo;
+  return {
+    action: "opened",
+    repository: {
+      id: stableNumericId(fullName),
+      name: input.repo,
+      full_name: fullName,
+      owner: { login: input.owner },
+      html_url: "https://github.example.test/" + fullName,
+    },
+    issue: {
+      id: stableNumericId(fullName + "#" + issueNumber),
+      node_id: "I_sim_" + issueNumber,
+      number: issueNumber,
+      title: "[direct-webhook] " + issueNumber,
+      body: "Created by the Unblock direct webhook benchmark.",
+      state: "open",
+      state_reason: null,
+      html_url: "https://github.example.test/" + fullName + "/issues/" + issueNumber,
+      url: "https://api.github.example.test/repos/" + fullName + "/issues/" + issueNumber,
+      repository_url: "https://api.github.example.test/repos/" + fullName,
+      user: { login: "direct-benchmark", id: 1, type: "User" },
+      labels: [],
+      assignees: [],
+      milestone: null,
+      created_at: now,
+      updated_at: now,
+      closed_at: null,
+    },
+  };
+}
+function signedRequest(issueNumber) {
+  const body = JSON.stringify(payload(issueNumber));
+  const signature = createHmac("sha256", input.secret).update(body).digest("hex");
+  return {
+    body,
+    headers: {
+      "content-type": "application/json",
+      "x-github-delivery": "direct-" + input.projectId + "-" + issueNumber,
+      "x-github-event": "issues",
+      "x-hub-signature-256": "sha256=" + signature,
+      "user-agent": "GitHub-Hookshot/direct-webhook-benchmark-node",
+    },
+  };
+}
+const requests = Array.from({ length: input.issueCount }, (_item, index) => signedRequest(index + 1));
+let next = 0;
+let ok = 0;
+let failed = 0;
+const started = performance.now();
+async function worker() {
+  while (true) {
+    const index = next++;
+    if (index >= requests.length) return;
+    const request = requests[index];
+    try {
+      const response = await fetch(input.webhookUrl, {
+        method: "POST",
+        headers: request.headers,
+        body: request.body,
+      });
+      await response.body?.cancel();
+      if (response.ok) ok += 1;
+      else failed += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+}
+await Promise.all(Array.from({ length: Math.min(input.concurrency, input.issueCount) }, () => worker()));
+console.log(JSON.stringify({
+  total: input.issueCount,
+  ok,
+  failed,
+  submitWallMs: Math.round(performance.now() - started),
+}));
+`;
+  const output = await new Deno.Command("node", {
+    args: [
+      "--input-type=module",
+      "--eval",
+      script,
+      JSON.stringify(input),
+    ],
+    stdin: "null",
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const stdout = new TextDecoder().decode(output.stdout).trim();
+  if (!output.success) {
+    throw new Error(
+      `Node direct webhook client failed with exit code ${output.code}: ${
+        new TextDecoder().decode(output.stderr)
+      }`,
+    );
+  }
+  const parsed = JSON.parse(stdout) as {
+    total: number;
+    ok: number;
+    failed: number;
+    submitWallMs: number;
+  };
+  if (parsed.failed > 0 || parsed.ok !== parsed.total) {
+    throw new Error(`Node direct webhook client failures: ${stdout}`);
+  }
+  return parsed;
+}
+
+function directGitHubIssueWebhookPayload(input: {
+  owner: string;
+  repo: string;
+  issueNumber: number;
+}) {
+  const now = new Date().toISOString();
+  const fullName = `${input.owner}/${input.repo}`;
+  return {
+    action: "opened",
+    repository: {
+      id: stableNumericId(fullName),
+      name: input.repo,
+      full_name: fullName,
+      owner: { login: input.owner },
+      html_url: `https://github.example.test/${fullName}`,
+    },
+    issue: {
+      id: stableNumericId(`${fullName}#${input.issueNumber}`),
+      node_id: `I_sim_${input.issueNumber}`,
+      number: input.issueNumber,
+      title: `[direct-webhook] ${input.issueNumber}`,
+      body: "Created by the Unblock direct webhook benchmark.",
+      state: "open",
+      state_reason: null,
+      html_url:
+        `https://github.example.test/${fullName}/issues/${input.issueNumber}`,
+      url:
+        `https://api.github.example.test/repos/${fullName}/issues/${input.issueNumber}`,
+      repository_url: `https://api.github.example.test/repos/${fullName}`,
+      user: { login: "direct-benchmark", id: 1, type: "User" },
+      labels: [],
+      assignees: [],
+      milestone: null,
+      created_at: now,
+      updated_at: now,
+      closed_at: null,
+    },
+  };
+}
+
+async function signedGitHubWebhookRequest(
+  input: {
+    secret: string;
+    deliveryId: string;
+    event: string;
+    body: unknown;
+  },
+): Promise<{ body: string; headers: Record<string, string> }> {
+  const raw = JSON.stringify(input.body);
+  const signature = await hmacSha256Hex(input.secret, raw);
+  return {
+    body: raw,
+    headers: {
+      "content-type": "application/json",
+      "x-github-delivery": input.deliveryId,
+      "x-github-event": input.event,
+      "x-hub-signature-256": `sha256=${signature}`,
+      "user-agent": "GitHub-Hookshot/direct-webhook-benchmark",
+    },
+  };
+}
+
+async function hmacSha256Hex(secret: string, body: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const digest = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(body),
+  );
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function stableNumericId(value: string): number {
+  let hash = 2_166_136_261;
+  for (const char of value) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return Math.abs(hash);
 }
 
 async function startReconcileFlow(
@@ -734,6 +1164,76 @@ async function waitForTaskCountHttp(
   );
 }
 
+async function waitForPrismEffectResults(
+  env: Env,
+  expected: number,
+  timeoutMs: number,
+) {
+  const postgresUrl = postgresUrlForPrism(env);
+  if (!postgresUrl) return 0;
+  const projectId = required(env, "PRISM_FLOWS_PROJECT_ID");
+  const projectLiteral = sqlLiteral(projectId);
+  const deadline = Date.now() + timeoutMs;
+  let lastCount = 0;
+  while (Date.now() <= deadline) {
+    lastCount = await psqlInt(
+      postgresUrl,
+      `
+        select count(*)::int
+        from prism_flows_v2_log
+        where project_id = ${projectLiteral}
+          and record_kind = 'effect.result'
+          and causation_id like 'workflow:github-issues-%'
+      `,
+    );
+    if (lastCount >= expected) return lastCount;
+    await delay(50);
+  }
+  throw new Error(
+    `Timed out waiting for ${expected} Prism effect results; observed ${lastCount}.`,
+  );
+}
+
+async function waitForPrismWorkflowCompletions(
+  env: Env,
+  expected: number,
+  timeoutMs: number,
+) {
+  const postgresUrl = postgresUrlForPrism(env);
+  if (!postgresUrl) return 0;
+  const projectId = required(env, "PRISM_FLOWS_PROJECT_ID");
+  const projectLiteral = sqlLiteral(projectId);
+  const deadline = Date.now() + timeoutMs;
+  let lastCount = 0;
+  while (Date.now() <= deadline) {
+    lastCount = await psqlInt(
+      postgresUrl,
+      `
+        with latest as (
+          select distinct on (payload_json::jsonb #>> '{WorkflowState,operations,0,workflow_key}')
+            payload_json::jsonb #>> '{WorkflowState,operations,0,workflow_key}' as workflow_key,
+            payload_json::jsonb #>> '{WorkflowState,operations,0,status}' as status,
+            sequence
+          from prism_flows_v2_log
+          where project_id = ${projectLiteral}
+            and record_kind = 'workflow.state'
+            and correlation_id like 'github-issues-%'
+          order by payload_json::jsonb #>> '{WorkflowState,operations,0,workflow_key}', sequence desc
+        )
+        select count(*)::int
+        from latest
+        where workflow_key is not null
+          and status = 'succeeded'
+      `,
+    );
+    if (lastCount >= expected) return lastCount;
+    await delay(50);
+  }
+  throw new Error(
+    `Timed out waiting for ${expected} Prism workflow completions; observed ${lastCount}.`,
+  );
+}
+
 async function collectBenchmarkDiagnostics(env: Env) {
   const postgresUrl = postgresUrlForUnblock(env);
   const unblock = postgresUrl
@@ -796,6 +1296,7 @@ async function collectPrismBenchmarkDiagnostics(
           causation_id,
           correlation_id,
           payload_schema,
+          payload_json::jsonb as payload,
           occurred_at_ms,
           shard_group_id
         from prism_flows_v2_log
@@ -812,11 +1313,28 @@ async function collectPrismBenchmarkDiagnostics(
           from flow_log
           where record_kind = 'workflow.state' and correlation_id like 'github-issues-%'
           union all
-          select regexp_replace(causation_id, '^workflow:(.*):effect:.*$', '\\1') as workflow_key, occurred_at_ms
+          select substring(causation_id from '^workflow:(.*):effect:flow-js:') as workflow_key, occurred_at_ms
           from flow_log
           where record_kind = 'effect.intent' and causation_id like 'workflow:github-issues-%:effect:%'
         ) keyed
+        where workflow_key is not null
         group by workflow_key
+      ),
+      workflow_latest_states as (
+        select distinct on (workflow_key)
+          workflow_key,
+          status,
+          occurred_at_ms
+        from (
+          select
+            payload #>> '{WorkflowState,operations,0,workflow_key}' as workflow_key,
+            payload #>> '{WorkflowState,operations,0,status}' as status,
+            occurred_at_ms
+          from flow_log
+          where record_kind = 'workflow.state'
+        ) states
+        where workflow_key is not null
+        order by workflow_key, occurred_at_ms desc
       ),
       effect_intents as (
         select causation_id, payload_schema, occurred_at_ms
@@ -834,9 +1352,9 @@ async function collectPrismBenchmarkDiagnostics(
         where record_kind = 'effect.result'
       ),
       completed_workflows as (
-        select distinct regexp_replace(causation_id, '^workflow:(.*):effect:job:1$', '\\1') as workflow_key
-        from effect_results
-        where causation_id like '%:effect:job:1'
+        select workflow_key
+        from workflow_latest_states
+        where status = 'succeeded'
       ),
       effect_timings as (
         select
@@ -1060,6 +1578,29 @@ type ManagedProcess = {
   tail: () => string;
 };
 
+async function runCommand(
+  command: string,
+  args: string[],
+  input: { cwd: string; env: Record<string, string> },
+) {
+  const output = await new Deno.Command(command, {
+    args,
+    cwd: input.cwd,
+    env: input.env,
+    stdin: "null",
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (!output.success) {
+    const decoder = new TextDecoder();
+    throw new Error(
+      `${command} ${args.join(" ")} failed with exit code ${output.code}\n${
+        decoder.decode(output.stdout)
+      }${decoder.decode(output.stderr)}`,
+    );
+  }
+}
+
 function startManagedProcess(input: {
   command: string;
   args: string[];
@@ -1223,7 +1764,25 @@ function positiveInteger(value: string | undefined, fallback: number): number {
 
 function isHarnessMode(value: string): value is HarnessMode {
   return value === "e2e" || value === "benchmark-reconcile" ||
-    value === "benchmark-webhook";
+    value === "benchmark-webhook" || value === "benchmark-direct-webhook";
+}
+
+function parseUnblockServerMode(
+  value: string | undefined,
+): HarnessOptions["unblockServerMode"] {
+  if (!value) return "dist";
+  if (value === "dist" || value === "dev") return value;
+  throw new Error(`Unsupported unblock server mode ${value}. Expected dist or dev.`);
+}
+
+function parseDirectWebhookClient(
+  value: string | undefined,
+): HarnessOptions["directWebhookClient"] {
+  if (!value) return "node";
+  if (value === "node" || value === "deno") return value;
+  throw new Error(
+    `Unsupported direct webhook client ${value}. Expected node or deno.`,
+  );
 }
 
 function required(env: Env, key: string): string {

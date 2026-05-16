@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { UnblockError, validation } from "./errors.js";
 import { createServices } from "./services.js";
 import type {
@@ -6,12 +7,18 @@ import type {
   OutboxEventRepository,
 } from "./store.js";
 import {
+  addTaskSchema,
+  type Activity,
+  type ConnectorExternalMapping,
   type EditTaskInput,
   type InboxEvent,
   nowIso,
+  normalizeId,
   type OutboxEvent,
+  type Task,
 } from "./types.js";
 import {
+  githubIssueExternalId,
   githubIssueMappingInputSchema,
   upsertGitHubIssueMapping,
 } from "./github-connector.js";
@@ -198,6 +205,22 @@ export interface ConnectorInboxApplyResult {
   evidence: Record<string, unknown>;
 }
 
+interface ConnectorTaskUpsertStore {
+  applyConnectorTaskUpsert(input: {
+    inboxEvent: InboxEvent;
+    task: Task;
+    mapping: ConnectorExternalMapping;
+    activity: Activity;
+    evidence: Record<string, unknown>;
+    appliedAt: string;
+  }): Promise<{
+    inboxEvent: InboxEvent;
+    applied: boolean;
+    duplicate: boolean;
+    taskInserted: boolean;
+  }>;
+}
+
 export async function applyConnectorInboxEvent(
   store: AppStore,
   eventInput: ConnectorEvent,
@@ -207,8 +230,182 @@ export async function applyConnectorInboxEvent(
     actor?: string | undefined;
   } = {},
 ): Promise<ConnectorInboxApplyResult> {
-  const inbox = requireInbox(store.inbox);
   const event = connectorEventSchema.parse(eventInput);
+  const fastPath = connectorTaskUpsertStore(store);
+  if (fastPath && canUseConnectorTaskUpsertFastPath(event)) {
+    return applyConnectorTaskUpsertFastPath(fastPath, event, options);
+  }
+  if (store.capabilities?.dialect === "postgres" || store.capabilities?.dialect === "hosted") {
+    return await store.transaction(async (repos) =>
+      applyConnectorInboxEventWithRepos(repos as AppStore, event, options)
+    );
+  }
+  return await applyConnectorInboxEventWithRepos(store, event, options);
+}
+
+function connectorTaskUpsertStore(
+  store: AppStore,
+): ConnectorTaskUpsertStore | null {
+  const candidate = store as AppStore & Partial<ConnectorTaskUpsertStore>;
+  return typeof candidate.applyConnectorTaskUpsert === "function"
+    ? candidate as ConnectorTaskUpsertStore
+    : null;
+}
+
+function canUseConnectorTaskUpsertFastPath(event: ConnectorEvent): boolean {
+  return event.kind === "connector.inbound.task_upserted" &&
+    event.scope.provider === "github" &&
+    !!event.task &&
+    !!event.mapping;
+}
+
+async function applyConnectorTaskUpsertFastPath(
+  store: ConnectorTaskUpsertStore,
+  event: ConnectorEvent,
+  options: {
+    source?: string | undefined;
+    machine?: string | undefined;
+    actor?: string | undefined;
+  },
+): Promise<ConnectorInboxApplyResult> {
+  if (!event.task) {
+    validation("connector.inbound.task_upserted requires task payload.");
+  }
+  if (!event.mapping) {
+    validation("connector.inbound.task_upserted requires mapping payload.");
+  }
+  const now = nowIso();
+  const inboxEvent = inboxEventForConnector(
+    event,
+    options.source ?? "prism-flows",
+  );
+  const taskInput = addTaskSchema.parse({
+    id: event.task.id,
+    title: event.task.title,
+    description: event.task.description,
+    lifecycle: event.task.lifecycle,
+    priority: event.task.priority,
+    sourceDoc: event.external?.url ?? event.task.sourceUrl ?? null,
+    sourceSection: event.external
+      ? `${event.external.system}:${event.external.kind}`
+      : null,
+    sourceAnchor: event.external?.id ?? null,
+  });
+  const task: Task = {
+    projectId: event.scope.projectId,
+    id: normalizeId(taskInput.id),
+    parentTaskId: taskInput.parentTaskId,
+    title: taskInput.title,
+    description: taskInput.description,
+    lifecycle: taskInput.lifecycle,
+    priority: taskInput.priority,
+    size: taskInput.size,
+    sourceDoc: taskInput.sourceDoc,
+    sourceSection: taskInput.sourceSection,
+    sourceAnchor: taskInput.sourceAnchor,
+    sourceLine: taskInput.sourceLine,
+    sourceText: taskInput.sourceText,
+    completionBar: taskInput.completionBar,
+    createdAt: now,
+    updatedAt: now,
+    startedAt: taskInput.lifecycle === "started" ||
+        taskInput.lifecycle === "finished"
+      ? now
+      : null,
+    finishedAt: taskInput.lifecycle === "finished" ? now : null,
+    archivedAt: null,
+    version: 1,
+  };
+  const mapping = githubIssueMappingForFastPath(event, task.id, now);
+  const mappingEvidence = {
+    provider: mapping.provider,
+    externalKind: mapping.externalKind,
+    externalId: mapping.externalId,
+    localKind: mapping.localKind,
+    localId: mapping.localId,
+    status: mapping.status,
+  };
+  const machine = options.machine ?? "prism-flows";
+  const actor = options.actor ?? `connector:${event.scope.provider}`;
+  const activity: Activity = {
+    projectId: task.projectId,
+    id: randomUUID(),
+    type: "task.upserted",
+    subjectType: "task",
+    subjectId: task.id,
+    message: `Upserted ${task.id}`,
+    data: { title: task.title },
+    machine,
+    actor,
+    createdAt: now,
+  };
+  const evidence = {
+    taskId: task.id,
+    external: event.external ?? null,
+    mapping: mappingEvidence,
+  };
+  const applied = await store.applyConnectorTaskUpsert({
+    inboxEvent,
+    task,
+    mapping,
+    activity,
+    evidence,
+    appliedAt: nowIso(),
+  });
+  const action = applied.taskInserted ? "task.created" : "task.updated";
+  return {
+    inboxEvent: applied.inboxEvent,
+    applied: applied.applied,
+    duplicate: applied.duplicate,
+    evidence: applied.duplicate
+      ? { duplicateOf: applied.inboxEvent.id }
+      : { ...evidence, action },
+  };
+}
+
+function githubIssueMappingForFastPath(
+  event: ConnectorEvent,
+  taskId: string,
+  now: string,
+): ConnectorExternalMapping {
+  const parsed = githubIssueMappingInputSchema.parse(event.mapping);
+  return {
+    projectId: parsed.projectId,
+    connectionId: parsed.connectionId,
+    provider: "github",
+    externalKind: "issue",
+    externalId: githubIssueExternalId(parsed),
+    externalUrl: parsed.issueUrl,
+    externalVersion: parsed.externalVersion ?? null,
+    localKind: "task",
+    localId: taskId,
+    localVersion: parsed.localVersion ?? null,
+    syncDirection: parsed.syncDirection,
+    conflictPolicy: parsed.conflictPolicy,
+    status: parsed.status,
+    createdAt: now,
+    updatedAt: now,
+    archivedAt: parsed.status === "archived" ? now : null,
+    metadata: {
+      ...parsed.metadata,
+      repositoryOwner: parsed.repositoryOwner,
+      repositoryName: parsed.repositoryName,
+      issueNumber: parsed.issueNumber,
+      issueNodeId: parsed.issueNodeId ?? null,
+    },
+  };
+}
+
+async function applyConnectorInboxEventWithRepos(
+  store: AppStore,
+  event: ConnectorEvent,
+  options: {
+    source?: string | undefined;
+    machine?: string | undefined;
+    actor?: string | undefined;
+  },
+): Promise<ConnectorInboxApplyResult> {
+  const inbox = requireInbox(store.inbox);
   const inboxEvent = inboxEventForConnector(
     event,
     options.source ?? "prism-flows",

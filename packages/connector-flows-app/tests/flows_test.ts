@@ -12,20 +12,26 @@ Deno.test("hosted Unblock connector Flow app builds", () => {
   app.flow("github-issues-reconcile");
   app.assertPermissionManifest({
     connections: ["unblock-hosted-api", "mock-external", "github-api"],
-    jobs: [
-      "mockConnectorApply",
-      "normalizeGitHubIssueWebhook",
-      "prepareGitHubIssueOutbound",
-      "finalizeGitHubIssueOutbound",
-      "prepareGitHubIssueBackfill",
-      "normalizeGitHubIssueBackfill",
-    ],
+    jobs: [],
     secrets: ["UNBLOCK_HOSTED_API_TOKEN", "MOCK_CONNECTOR_TOKEN", "GITHUB_INSTALLATION_TOKEN"],
   });
-  app.assertGraphContains("unblock-connector-dispatch", ["trigger", "deno", "http"]);
-  app.assertGraphContains("github-issues-inbound", ["trigger", "deno", "http"]);
-  app.assertGraphContains("github-issues-outbound", ["trigger", "deno", "http"]);
-  app.assertGraphContains("github-issues-reconcile", ["trigger", "deno", "http"]);
+  for (
+    const flowId of [
+      "unblock-connector-dispatch",
+      "github-issues-inbound",
+      "github-issues-outbound",
+      "github-issues-reconcile",
+    ]
+  ) {
+    const flow = app.flow(flowId);
+    if (flow.engine !== "js") {
+      throw new Error(`${flowId} should use the Flow JS engine`);
+    }
+  }
+  app.assertGraphContains("unblock-connector-dispatch", ["trigger", "http"]);
+  app.assertGraphContains("github-issues-inbound", ["trigger", "http"]);
+  app.assertGraphContains("github-issues-outbound", ["trigger", "http"]);
+  app.assertGraphContains("github-issues-reconcile", ["trigger", "http"]);
 });
 
 Deno.test("hosted Unblock connector Flow app simulates manual dispatch", () => {
@@ -53,9 +59,6 @@ Deno.test("hosted Unblock connector Flow app simulates manual dispatch", () => {
     },
   });
 
-  if (!simulation.events.some((event) => event.kind === "deno_job")) {
-    throw new Error("manual connector simulation did not include connector job evidence");
-  }
   if (!simulation.events.some((event) => event.kind === "http_request")) {
     throw new Error("manual connector simulation did not include Unblock inbox HTTP evidence");
   }
@@ -75,12 +78,8 @@ Deno.test("hosted Unblock GitHub reconcile Flow polls with cursor evidence", () 
   });
 
   const httpRequests = simulation.events.filter((event) => event.kind === "http_request");
-  const denoJobs = simulation.events.filter((event) => event.kind === "deno_job");
   if (httpRequests.length < 4) {
     throw new Error("GitHub reconcile simulation did not include config lookup, GitHub poll, inbox writes, and cursor write");
-  }
-  if (denoJobs.length < 2) {
-    throw new Error("GitHub reconcile simulation did not include prepare and normalize jobs");
   }
 });
 
@@ -110,12 +109,8 @@ Deno.test("hosted Unblock GitHub outbound Flow syncs tasks through GitHub API", 
   });
 
   const httpRequests = simulation.events.filter((event) => event.kind === "http_request");
-  const denoJobs = simulation.events.filter((event) => event.kind === "deno_job");
   if (httpRequests.length < 4) {
     throw new Error("GitHub outbound simulation did not include task lookup, connection lookup, GitHub write, and mapping writeback");
-  }
-  if (denoJobs.length < 2) {
-    throw new Error("GitHub outbound simulation did not include prepare and finalize jobs");
   }
 });
 
@@ -153,9 +148,6 @@ Deno.test("hosted Unblock GitHub inbound Flow dedupes webhook deliveries", () =>
 
   if (simulation.triggerKind !== "webhook") {
     throw new Error("GitHub inbound simulation did not use webhook trigger");
-  }
-  if (!simulation.events.some((event) => event.kind === "deno_job")) {
-    throw new Error("GitHub inbound simulation did not normalize the webhook");
   }
   const httpRequests = simulation.events.filter((event) => event.kind === "http_request");
   if (httpRequests.length !== 1) {

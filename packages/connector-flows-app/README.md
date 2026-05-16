@@ -10,8 +10,6 @@ Current fixture:
 
 - `unblock-connector-dispatch`: manual outbox dispatch plus scheduled
   reconciliation trigger.
-- `mockConnectorApply`: deterministic mock connector job used to review the Flow
-  boundary before GitHub Issues is implemented.
 - `github-issues-inbound`: GitHub `issues` webhook ingestion with Prism trigger
   signature metadata, delivery dedupe, issue-to-task mapping, and Unblock inbox
   application.
@@ -21,12 +19,8 @@ Current fixture:
 - `github-issues-reconcile`: manual and scheduled GitHub issue backfill/polling
   that reuses the same mapping/inbox path and advances a durable cursor only
   after Unblock writes are requested.
-- `normalizeGitHubIssueWebhook`: deterministic webhook normalizer that converts
-  GitHub issue payloads into typed Unblock connector events and mapping writes.
-- `prepareGitHubIssueOutbound` / `finalizeGitHubIssueOutbound`: deterministic
-  request shaping and mapping finalization for outbound GitHub sync.
-- `prepareGitHubIssueBackfill` / `normalizeGitHubIssueBackfill`: deterministic
-  polling request shaping and issue list normalization for reconciliation.
+- Flow-local TypeScript helpers perform deterministic payload normalization,
+  request shaping, and mapping finalization inside the Prism Flow JS engine.
 - `unblock-hosted-api`: redacted bearer-token connection to hosted Unblock.
 - `github-api`: rate-limited GitHub REST API connection for installation-token
   issue writes. Set `GITHUB_API_BASE_URL` to point both the smoke runner and

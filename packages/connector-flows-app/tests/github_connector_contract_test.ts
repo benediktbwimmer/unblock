@@ -65,6 +65,9 @@ Deno.test("GitHub flows retain idempotency and retry policy in source", async ()
     await Deno.readTextFile(
       new URL("../jobs/github-connector.ts", import.meta.url),
     ),
+    await Deno.readTextFile(
+      new URL("../helpers/github-connector.ts", import.meta.url),
+    ),
   ].join("\n");
   for (
     const expected of [

@@ -62,6 +62,22 @@ export interface PostgresStoreOptions {
   pool?: pg.Pool | undefined;
 }
 
+export interface PostgresConnectorTaskUpsertApplyInput {
+  inboxEvent: InboxEvent;
+  task: Task;
+  mapping: ConnectorExternalMapping;
+  activity: Activity;
+  evidence: Record<string, unknown>;
+  appliedAt: string;
+}
+
+export interface PostgresConnectorTaskUpsertApplyResult {
+  inboxEvent: InboxEvent;
+  applied: boolean;
+  duplicate: boolean;
+  taskInserted: boolean;
+}
+
 export class PostgresStore implements AppStore {
   readonly capabilities = {
     dialect: "postgres",
@@ -172,6 +188,157 @@ export class PostgresStore implements AppStore {
 
   async exec(sql: string): Promise<void> {
     await this.queryable.query(sql);
+  }
+
+  async applyConnectorTaskUpsert(
+    input: PostgresConnectorTaskUpsertApplyInput,
+  ): Promise<PostgresConnectorTaskUpsertApplyResult> {
+    const inbox = input.inboxEvent;
+    const task = input.task;
+    const mapping = input.mapping;
+    const activity = input.activity;
+    const evidence = JSON.stringify(input.evidence);
+    const params = [
+      this.tenantId,
+      inbox.projectId,
+      inbox.id,
+      inbox.source,
+      inbox.externalEventId,
+      inbox.eventType,
+      JSON.stringify(inbox.payload),
+      inbox.createdAt,
+      JSON.stringify(inbox.error),
+      JSON.stringify(inbox.evidence),
+      ...connectorExternalMappingParams(this.tenantId, mapping).slice(1),
+      ...taskParams(this.tenantId, task).slice(1),
+      activity.projectId,
+      activity.id,
+      activity.subjectType,
+      activity.subjectId,
+      JSON.stringify(activity.data),
+      activity.machine,
+      activity.actor,
+      activity.createdAt,
+      input.appliedAt,
+      evidence,
+    ];
+    const result = await this.queryable.query(
+      `
+      with inserted_inbox as (
+        insert into inbox_events (
+          tenant_id, project_id, id, source, external_event_id, event_type, payload_json,
+          status, applied_at, created_at, error_json, evidence_json
+        )
+        values ($1, $2, $3, $4, $5, $6, $7::jsonb, 'applied', $56, $8, $9::jsonb, $10::jsonb || $57::jsonb)
+        on conflict (tenant_id, source, external_event_id) do nothing
+        returning *
+      ),
+      existing_inbox as (
+        select inbox_events.*
+        from inbox_events
+        where tenant_id = $1 and source = $4 and external_event_id = $5 and not exists (select 1 from inserted_inbox)
+        limit 1
+      ),
+      existing_task as (
+        select 1
+        from tasks
+        where tenant_id = $1 and project_id = $28 and id = $29
+      ),
+      mapping_write as (
+        insert into connector_external_mappings (
+          tenant_id, project_id, connection_id, provider, external_kind, external_id,
+          external_url, external_version, local_kind, local_id, local_version,
+          sync_direction, conflict_policy, status, created_at, updated_at, archived_at,
+          metadata_json
+        )
+        select
+          $1, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+          $21, $22, $23, $24, $25, $26, $27::jsonb
+        where exists (select 1 from inserted_inbox)
+        on conflict (tenant_id, project_id, connection_id, external_kind, external_id) do update set
+          provider = excluded.provider,
+          external_url = excluded.external_url,
+          external_version = excluded.external_version,
+          local_kind = excluded.local_kind,
+          local_id = excluded.local_id,
+          local_version = coalesce(excluded.local_version, connector_external_mappings.local_version),
+          sync_direction = excluded.sync_direction,
+          conflict_policy = excluded.conflict_policy,
+          status = excluded.status,
+          updated_at = excluded.updated_at,
+          archived_at = excluded.archived_at,
+          metadata_json = excluded.metadata_json
+        returning 1
+      ),
+      task_write as (
+        insert into tasks (
+          tenant_id, project_id, id, parent_task_id, title, description, lifecycle, priority, size, source_doc, source_section,
+          source_anchor, source_line, source_text, completion_bar, created_at, updated_at,
+          started_at, finished_at, archived_at, version
+        )
+        select
+          $1, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37,
+          $38, $39, $40, $41, $42, $43, $44, $45, $46, $47
+        where exists (select 1 from inserted_inbox)
+        on conflict (tenant_id, project_id, id) do update set
+          title = excluded.title,
+          description = excluded.description,
+          lifecycle = excluded.lifecycle,
+          priority = excluded.priority,
+          size = excluded.size,
+          source_doc = excluded.source_doc,
+          source_section = excluded.source_section,
+          source_anchor = excluded.source_anchor,
+          source_line = excluded.source_line,
+          source_text = excluded.source_text,
+          completion_bar = excluded.completion_bar,
+          updated_at = excluded.updated_at,
+          started_at = case
+            when excluded.lifecycle in ('started', 'finished') then coalesce(tasks.started_at, excluded.started_at)
+            when excluded.lifecycle = 'open' then tasks.started_at
+            else excluded.started_at
+          end,
+          finished_at = case when excluded.lifecycle = 'finished' then excluded.finished_at else null end,
+          archived_at = null,
+          version = tasks.version + 1
+        returning not exists (select 1 from existing_task) as inserted
+      ),
+      activity_write as (
+        insert into activity (
+          tenant_id, project_id, id, type, subject_type, subject_id, message, data_json, machine, actor, created_at
+        )
+        select
+          $1,
+          $48,
+          $49,
+          case when coalesce((select inserted from task_write), false) then 'task.created' else 'task.updated' end,
+          $50,
+          $51,
+          case when coalesce((select inserted from task_write), false) then 'Created ' || $29 else 'Updated ' || $29 end,
+          $52::jsonb,
+          $53,
+          $54,
+          $55
+        where exists (select 1 from inserted_inbox)
+        returning 1
+      )
+      select inserted_inbox.*, true as applied, false as duplicate, coalesce((select inserted from task_write), false) as task_inserted
+      from inserted_inbox
+      union all
+      select existing_inbox.*, false as applied, true as duplicate, false as task_inserted
+      from existing_inbox
+      where not exists (select 1 from inserted_inbox)
+      limit 1
+    `,
+      params,
+    );
+    const row = result.rows[0];
+    return {
+      inboxEvent: inboxEventFromRow(row),
+      applied: row.applied === true,
+      duplicate: row.duplicate === true,
+      taskInserted: row.task_inserted === true,
+    };
   }
 
   async close(): Promise<void> {

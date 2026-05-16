@@ -9,8 +9,16 @@ import {
   githubReconcileInputSchema,
   githubWebhookInputSchema,
 } from "../jobs/github-connector.ts";
+import {
+  finalizeGitHubIssueOutbound,
+  normalizeGitHubIssueBackfill,
+  normalizeGitHubIssueWebhook,
+  prepareGitHubIssueBackfill,
+  prepareGitHubIssueOutbound,
+} from "../helpers/github-connector.ts";
 
 flow("github-issues-inbound", {
+  engine: "js",
   trigger: webhook("github.issues", {
     path: "/webhooks/github/issues",
     signature: "github",
@@ -32,7 +40,6 @@ flow("github-issues-inbound", {
   },
   permissions: {
     connections: ["unblock-hosted-api"],
-    jobs: ["normalizeGitHubIssueWebhook"],
   },
   retention: { runs: "30d", logs: "30d", payload: "30d" },
   labels: {
@@ -41,11 +48,7 @@ flow("github-issues-inbound", {
     direction: "inbound",
   },
   run: async (ctx, input: any) => {
-    const normalized: any = await ctx.deno(
-      "normalizeGitHubIssueWebhook",
-      input,
-      { placement: "inline-preferred" },
-    );
+    const normalized: any = normalizeGitHubIssueWebhook(input);
     return await ctx.http("unblock-hosted-api", {
       method: "POST",
       path: "/api/connectors/inbox",
@@ -62,6 +65,7 @@ flow("github-issues-inbound", {
 });
 
 flow("github-issues-outbound", {
+  engine: "js",
   trigger: manual(connectorDispatchInputSchema),
   concurrency: {
     key: (input: any) =>
@@ -71,7 +75,6 @@ flow("github-issues-outbound", {
   },
   permissions: {
     connections: ["unblock-hosted-api", "github-api"],
-    jobs: ["prepareGitHubIssueOutbound", "finalizeGitHubIssueOutbound"],
   },
   retention: { runs: "30d", logs: "30d", payload: "30d" },
   labels: {
@@ -82,7 +85,7 @@ flow("github-issues-outbound", {
   run: async (ctx, input: any) => {
     const event = input.event;
     const taskId = event.local?.id ?? event.task?.id;
-    const [task, connections]: any[] = await Promise.all([
+    const [taskResponse, connectionsResponse]: any[] = await Promise.all([
       ctx.http("unblock-hosted-api", {
         method: "GET",
         path: `/api/tasks/${encodeURIComponent(taskId)}?projectId=${
@@ -106,12 +109,14 @@ flow("github-issues-outbound", {
         },
       }),
     ]);
-    const prepared: any = await ctx.deno("prepareGitHubIssueOutbound", {
+    const task: any = taskResponse?.body ?? taskResponse;
+    const connections: any = connectionsResponse?.body ?? connectionsResponse;
+    const prepared: any = prepareGitHubIssueOutbound({
       trigger: input,
       task,
       connections,
-    }, { placement: "inline-preferred" });
-    const githubIssue: any = await ctx.http("github-api", {
+    });
+    const githubIssueResponse: any = await ctx.http("github-api", {
       ...prepared.request,
       idempotencyKey: prepared.idempotencyKey,
       outcomeRecovery: "reconcile_by_external_id",
@@ -121,10 +126,11 @@ flow("github-issues-outbound", {
         retryOn: ["429", "5xx", "network"],
       },
     });
-    const finalized: any = await ctx.deno("finalizeGitHubIssueOutbound", {
+    const githubIssue: any = githubIssueResponse?.body ?? githubIssueResponse;
+    const finalized: any = finalizeGitHubIssueOutbound({
       prepared,
       response: githubIssue,
-    }, { placement: "inline-preferred" });
+    });
     return await ctx.http("unblock-hosted-api", {
       method: "POST",
       path: "/api/connectors/github/mappings",
@@ -140,6 +146,7 @@ flow("github-issues-outbound", {
 });
 
 flow("github-issues-reconcile", {
+  engine: "js",
   trigger: [
     manual(githubReconcileInputSchema),
     schedule("*/10 * * * *", {
@@ -160,7 +167,6 @@ flow("github-issues-reconcile", {
   },
   permissions: {
     connections: ["unblock-hosted-api", "github-api"],
-    jobs: ["prepareGitHubIssueBackfill", "normalizeGitHubIssueBackfill"],
   },
   retention: { runs: "30d", logs: "30d", payload: "30d" },
   labels: {
@@ -169,7 +175,7 @@ flow("github-issues-reconcile", {
     direction: "reconciliation",
   },
   run: async (ctx, input: any) => {
-    const connections: any = await ctx.http("unblock-hosted-api", {
+    const connectionsResponse: any = await ctx.http("unblock-hosted-api", {
       method: "GET",
       path: `/api/connectors/github/connections?projectId=${
         encodeURIComponent(input.projectId)
@@ -180,11 +186,12 @@ flow("github-issues-reconcile", {
         retryOn: ["429", "5xx", "network"],
       },
     });
-    const prepared: any = await ctx.deno("prepareGitHubIssueBackfill", {
+    const connections: any = connectionsResponse?.body ?? connectionsResponse;
+    const prepared: any = prepareGitHubIssueBackfill({
       input,
       connections,
-    }, { placement: "inline-preferred" });
-    const issues: any = await ctx.http("github-api", {
+    });
+    const issuesResponse: any = await ctx.http("github-api", {
       ...prepared.request,
       retry: {
         maxAttempts: 8,
@@ -192,10 +199,11 @@ flow("github-issues-reconcile", {
         retryOn: ["429", "5xx", "network"],
       },
     });
-    const normalized: any = await ctx.deno("normalizeGitHubIssueBackfill", {
+    const issues: any = issuesResponse?.body ?? issuesResponse;
+    const normalized: any = normalizeGitHubIssueBackfill({
       prepared,
       response: issues,
-    }, { placement: "inline-preferred" });
+    });
     await ctx.http("unblock-hosted-api", {
       method: "POST",
       path: "/api/connectors/github/mappings/batch",

@@ -860,10 +860,10 @@ async function prismFlowClient(
 ) {
   const timeoutMs = Number(env.UNBLOCK_SMOKE_TIMEOUT_MS ?? 30_000);
   if (typeof Deno !== "undefined") {
-    const { DenoGrpcPrismFlowClient } = await import(
+    const { IsolatedDenoGrpcPrismFlowClient } = await import(
       "../../../../prism-new3/packages/prism-flows/execution-deno.ts"
     );
-    return new DenoGrpcPrismFlowClient({
+    return new IsolatedDenoGrpcPrismFlowClient({
       endpoint,
       protoPath: env.PRISM_RUNTIME_PROTO?.trim(),
       defaultProjectId,

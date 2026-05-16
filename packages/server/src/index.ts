@@ -74,6 +74,7 @@ export interface ServerOptions {
 type SharedPostgresRuntime = {
   pool: ReturnType<typeof createPostgresPool>;
   migrations: Promise<void>;
+  stores: Map<string, Promise<AppStore>>;
 };
 
 export function createApp(options: ServerOptions = {}) {
@@ -778,6 +779,18 @@ async function openStore(
   if ((backend ?? "").trim().toLowerCase() === "prism") {
     return openLegacyPrismStore();
   }
+  const explicitPostgresUrl = options.postgresUrl ?? process.env.UNBLOCK_POSTGRES_URL;
+  if (
+    explicitPostgresUrl &&
+    ((backend ?? "").trim().toLowerCase() === "postgres" ||
+      (backend ?? "").trim().toLowerCase() === "hosted")
+  ) {
+    return openPostgresStoreForUrl(
+      explicitPostgresUrl,
+      requestTenantId,
+      postgresRuntimes,
+    );
+  }
 
   const config = await readUnblockConfig(options.configPath ?? process.env.UNBLOCK_CONFIG ?? defaultUnblockConfigPath());
   const storage = resolveUnblockStorageConfig(config.config, process.env, {
@@ -788,19 +801,38 @@ async function openStore(
   if (storage.mode === "sqlite") {
     return createSqliteStore(defined({ databasePath: storage.sqlitePath, autoMigrate: true }));
   }
+  return openPostgresStoreForUrl(
+    storage.postgresUrl,
+    requestTenantId,
+    postgresRuntimes,
+  );
+}
+
+async function openPostgresStoreForUrl(
+  postgresUrl: string,
+  requestTenantId?: string | undefined,
+  postgresRuntimes?: Map<string, SharedPostgresRuntime>,
+): Promise<AppStore> {
+  const tenantId = requestTenantId ?? process.env.UNBLOCK_TENANT_ID;
   if (postgresRuntimes) {
-    const runtime = sharedPostgresRuntime(postgresRuntimes, storage.postgresUrl);
+    const runtime = sharedPostgresRuntime(postgresRuntimes, postgresUrl);
     await runtime.migrations;
-    return await createPostgresStore({
-      pool: runtime.pool,
-      tenantId: requestTenantId ?? process.env.UNBLOCK_TENANT_ID,
-      autoMigrate: false
-    });
+    const key = tenantId ?? "__default__";
+    let store = runtime.stores.get(key);
+    if (!store) {
+      store = createPostgresStore({
+        pool: runtime.pool,
+        tenantId,
+        autoMigrate: false
+      });
+      runtime.stores.set(key, store);
+    }
+    return await store;
   }
 
   return await createPostgresStore({
-    connectionString: storage.postgresUrl,
-    tenantId: requestTenantId ?? process.env.UNBLOCK_TENANT_ID,
+    connectionString: postgresUrl,
+    tenantId,
     autoMigrate: true
   });
 }
@@ -819,7 +851,7 @@ function sharedPostgresRuntime(
     const store = await createPostgresStore({ pool, autoMigrate: false });
     await runPostgresMigrations(store);
   })();
-  const runtime = { pool, migrations };
+  const runtime = { pool, migrations, stores: new Map<string, Promise<AppStore>>() };
   runtimes.set(connectionString, runtime);
   return runtime;
 }
