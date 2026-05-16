@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  connectorFieldPolicyRecordSchema,
+  connectorSyncPolicyPreset,
+  connectorSyncPresetSchema,
+} from "./connector-sync.js";
 import { validation } from "./errors.js";
 import { upsertConnectorConnection } from "./connector-reconciliation.js";
 import type { AppStore } from "./store.js";
@@ -38,6 +43,8 @@ export const githubConnectionInputSchema = z.object({
     "unblock_to_github",
     "bidirectional",
   ]).default("bidirectional"),
+  syncPreset: connectorSyncPresetSchema.default("execution_layer"),
+  fieldPolicies: connectorFieldPolicyRecordSchema.default({}),
   conflictPolicy: z.enum([
     "github_wins",
     "unblock_wins",
@@ -61,6 +68,8 @@ export const githubConnectionMetadataSchema = z.object({
     "unblock_to_github",
     "bidirectional",
   ]),
+  syncPreset: connectorSyncPresetSchema.default("execution_layer"),
+  fieldPolicies: connectorFieldPolicyRecordSchema.default({}),
   conflictPolicy: z.enum([
     "github_wins",
     "unblock_wins",
@@ -149,6 +158,11 @@ export async function upsertGitHubConnection(
     privateKeySecretId: parsed.privateKeySecretId,
     webhookSecretId: parsed.webhookSecretId,
     syncDirection: parsed.syncDirection,
+    syncPreset: parsed.syncPreset,
+    fieldPolicies: {
+      ...connectorSyncPolicyPreset("github", parsed.syncPreset, "issue").fields,
+      ...parsed.fieldPolicies,
+    },
     conflictPolicy: parsed.conflictPolicy,
     requiredPermissions: githubConnectorAuthModel.repositoryPermissions,
     subscribeEvents: [...githubConnectorAuthModel.subscribeEvents],

@@ -107,6 +107,12 @@ V2 adds:
 - optional GitHub/GitLab import/export
 - optional deployment artifacts
 
+For hosted connector work, V2 also adds an execution-layer identity split:
+external assignees map to accountable principals, while Unblock actor queues
+remain execution identities. A task can therefore be responsible to a human
+principal while being executed by a delegated agent queue. This distinction is
+required before rich issue tracker sync can be trustworthy.
+
 V2 must not rewrite the app model. The V1 storage abstraction, domain services,
 and migrations should make Postgres and team collaboration additive.
 

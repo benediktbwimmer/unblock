@@ -321,19 +321,51 @@ closure tables. The matcher AST remains the semantic source of truth.
 - Hosted connector configuration at tenant/project scope.
 - Key columns: `tenant_id`, `project_id`, `id`, `provider`, `display_name`,
   `status`, `settings_json`, `secret_ref`, timestamps, `archived_at`.
-- GitHub Issues is the first provider.
+- GitHub Issues and Jira Issues are the first proving providers. GitHub keeps
+  the low-friction path honest; Jira keeps the model honest for richer
+  enterprise semantics.
+
+`connector_sync_policies`
+
+- Global and matcher-scoped policy records for one connector.
+- Key columns: `tenant_id`, `project_id`, `id`, `connection_id`, `name`,
+  `scope_query`, `priority`, `enabled`, `policy_json`, timestamps,
+  `archived_at`.
+- `scope_query` is null for the connector default policy. Non-null queries use
+  the same matcher language as instructions and saved views. The highest
+  priority enabled matching policy overrides or refines the connector default
+  for the matched task/object.
+- `policy_json` is field-grained. It records ownership, direction, conflict
+  handling, manual-review requirements, outbound transition defaults, and
+  provider-specific behavior.
 
 `external_object_mappings`
 
 - Stable mapping between Unblock objects and external objects.
 - Key columns: `tenant_id`, `project_id`, `id`, `connection_id`,
   `external_system`, `external_kind`, `external_id`, `external_url`,
-  `local_kind`, `local_id`, `sync_direction`, `source_of_truth`,
-  `external_version`, `local_version`, timestamps, `archived_at`.
+  `local_kind`, `local_id`, `sync_mode`, `external_version`,
+  `local_version`, timestamps, `archived_at`.
+- The mapping identifies object identity and the last known versions. It is not
+  enough to decide sync behavior by itself; behavior comes from the resolved
+  sync policy.
 - Unique keys:
   - `(tenant_id, connection_id, external_system, external_kind, external_id)`
   - `(tenant_id, project_id, local_kind, local_id, connection_id,
     external_kind)`
+
+`sync_queue_items`
+
+- User-visible reconciliation queue for external/local divergence.
+- Key columns: `tenant_id`, `project_id`, `id`, `connection_id`, `mapping_id`,
+  `external_kind`, `external_id`, `local_kind`, `local_id`, `status`,
+  `severity`, `detected_at`, `last_attempt_at`, `resolved_at`,
+  `resolved_by_principal_id`, `decision_json`, `external_snapshot_json`,
+  `local_snapshot_json`, `diff_json`, `policy_ref_json`, `error_json`.
+- Status values should distinguish at least `pending`, `auto_applying`,
+  `blocked`, `manual_review`, `ignored`, `resolved`, and `failed`.
+- Queue items are not only errors. They represent every meaningful divergence
+  where a human or policy may need to understand what will happen.
 
 `sync_cursors`
 
@@ -355,6 +387,43 @@ closure tables. The matcher AST remains the semantic source of truth.
 - Key columns: `tenant_id`, `project_id`, `id`, `connection_id`, `source`,
   `event_ref`, `reason`, `payload_ref`, `status`, `created_at`,
   `resolved_at`, `resolved_by`.
+
+`principals`
+
+- Accountable identity inside a tenant. A principal may represent a human user,
+  team, bot, or service account.
+- Key columns: `tenant_id`, `id`, `kind`, `display_name`, `email`,
+  `created_at`, `updated_at`, `disabled_at`.
+- WorkOS users map to human principals in hosted mode. Self-hosted Postgres can
+  create local principals without WorkOS.
+
+`external_identities`
+
+- Provider identity mapping for connector assignees and authors.
+- Key columns: `tenant_id`, `connection_id`, `provider`, `external_kind`,
+  `external_id`, `external_display_name`, `external_email`, `principal_id`,
+  `confidence`, timestamps.
+- Examples: GitHub login or node ID to principal; Jira `accountId` to
+  principal. Unknown identities may exist without a `principal_id` until a user
+  maps them.
+
+`task_responsibilities`
+
+- Accountable ownership of task outcome, separate from execution assignment.
+- Key columns: `tenant_id`, `project_id`, `task_id`, `principal_id`,
+  `role`, `source`, `created_at`, `updated_at`, `archived_at`.
+- External assignees normally sync to responsibility assignments, not to actor
+  queues.
+
+`delegation_rules`
+
+- Policy allowing a principal or team to delegate execution to an Unblock actor
+  queue or agent pool.
+- Key columns: `tenant_id`, `project_id`, `id`, `principal_id`, `target_kind`,
+  `target_id`, `scope_query`, `priority`, `enabled`, timestamps,
+  `archived_at`.
+- Delegation is what lets a Jira assignee remain accountable while a machine
+  actor such as `codex-b` executes the work.
 
 ### Schema Work Deferred To Later Tasks
 
@@ -477,7 +546,139 @@ The following must stay out of Prism Flows for the hosted Unblock architecture:
 - User-visible source-of-truth state that cannot be reconstructed from Unblock
   Postgres.
 
-### First Connector Boundary
+## Connector Sync Product Model
+
+Hosted Unblock should treat connectors as policy-controlled reconciliation
+systems, not as one-way importers. The product promise is that external
+planning systems remain useful sources of planning truth while Unblock becomes
+the execution layer where dependencies, instructions, queues, agents, and
+human review are first-class.
+
+### Sync Modes And Field Ownership
+
+Sync is configurable per connector, per object type, per field, and through
+matcher-scoped overrides. The common high-level modes are:
+
+| Mode | Meaning |
+| --- | --- |
+| `disabled` | Link and observe objects, but do not detect or apply divergence. |
+| `manual` | Detect divergence and create sync queue items; a user chooses what to apply. |
+| `inbound_only` | External system is authoritative for the selected field/object. |
+| `outbound_only` | Unblock is authoritative for the selected field/object. |
+| `bidirectional` | Both sides may change; conflict policy decides ambiguous divergence. |
+| `append_only` | Both sides may append immutable records, such as comments, without rewriting history. |
+
+Direction by itself is not sufficient. Each field also needs an ownership and
+conflict policy. Good defaults should be simple enough to trust:
+
+- `Mirror External Work`: inbound issue content, no outbound writes.
+- `Execution Layer`: external issue content stays externally owned; Unblock
+  owns dependencies, instructions, execution assignment, review gates, and task
+  execution state. Optional outbound progress comments are allowed.
+- `Bidirectional Project Sync`: selected status, labels, comments, and assignee
+  fields sync both ways with explicit conflict handling.
+
+The recommended hosted default is `Execution Layer`.
+
+### Matcher-Scoped Sync Policies
+
+Connector defaults can be overridden with matcher-backed sync policies. This
+uses the same selector idea as instructions: a connector has a global default,
+then more specific enabled policies apply to tasks or mappings that match their
+selector.
+
+Example policy shape:
+
+```txt
+connector github-main preset execution_layer
+
+default fields:
+  title: inbound_only
+  description: inbound_only
+  external_state: inbound_only
+  comments: append_only
+  external_labels: inbound_only
+  dependencies: unblock_owned
+  instructions: unblock_owned
+  responsibility: inbound_to_principal
+  execution_assignment: unblock_owned
+
+override where `tag:agent-ready status:ready`:
+  execution_assignment: route_to_track("codex-b")
+  comments: outbound_progress_summaries
+
+override where `tag:security`:
+  responsibility: manual_review
+  execution_assignment: manual_review
+```
+
+Policy resolution must be explainable. The sync queue and task detail views
+should be able to show which policy matched and why a given field is inbound,
+outbound, ignored, or awaiting review.
+
+### Sync Queue
+
+The sync queue is the trust surface for connectors. It should not be a hidden
+error list. It should be an explicit reconciliation cockpit that shows where
+external state and Unblock state diverge and what Unblock plans to do.
+
+Each queue item should show:
+
+- connector, external object, local object, and mapping
+- field-level diff between external snapshot and local snapshot
+- resolved policy and matching policy source
+- proposed decision: apply inbound, apply outbound, ignore, block, or manual
+  review
+- reason and confidence
+- last webhook/reconciliation/run evidence
+- retry, apply, ignore, reopen, and escalate actions where permitted
+
+Examples:
+
+- GitHub title changed externally. Policy says title is inbound, so Unblock
+  updates the task title automatically and records the queue item as resolved.
+- Unblock task finished while Jira issue is `In Progress`. Policy allows
+  outbound status sync, but Jira requires a resolution field. The queue item is
+  blocked and offers the configured resolution choices.
+- Jira assignee changes from Alice to Bob. Policy says assignees map to
+  responsible principals, so Unblock updates responsibility to Bob and keeps the
+  execution queue assigned to the delegated agent.
+- Unblock dependency is added. GitHub Issues has no native dependency field in
+  the configured preset, so the divergence is ignored or represented only as an
+  optional outbound comment, depending on policy.
+
+### Assignees, Principals, Actors, And Delegation
+
+External assignees must not map directly to Unblock actor queues. External
+assignees are usually accountable users in Jira, Linear, GitHub, or Asana.
+Unblock actors are execution identities: humans, agents, machine-local agents,
+CI workers, or delegated queues.
+
+Unblock therefore separates:
+
+- `Principal`: accountable tenant identity, usually a human user or team.
+- `ExternalIdentity`: provider account mapped to a principal.
+- `TaskResponsibility`: who is responsible for the outcome.
+- `Track`: execution queue identity, currently `(machine, actor)`.
+- `DelegationRule`: when a responsible principal allows a track or actor pool
+  to execute matching work.
+- `TrackAssignment`: who or what should execute the next step.
+
+Example:
+
+```txt
+Jira assignee: Alice
+External identity: jira:accountId:abc -> principal:alice
+Task responsibility: Alice
+Delegation rule: Alice delegates `tag:backend status:ready` to CODEX-E
+Execution assignment: CODEX-E
+```
+
+Outbound sync should normally write the accountable principal back to external
+assignee fields, not the delegated machine actor. Agent execution evidence can
+be posted as comments or metadata only when policy allows it.
+
+### Provider Proving Grounds
 
 GitHub Issues is the first connector target.
 
@@ -494,6 +695,24 @@ The first production slice should support:
 It should not try to support every GitHub Project, pull request, label, or
 milestone behavior in the first connector milestone. Those should become later
 connector tasks after the issue sync path is proven.
+
+Jira Issues should be implemented alongside the connector policy foundation
+before the connector model is considered stable. Jira forces the abstractions
+to handle richer semantics:
+
+- issue types and custom fields
+- statuses and workflow transitions
+- required transition fields
+- priorities, components, fix versions, and sprints
+- parent/epic links and issue links
+- rich assignee/account IDs
+- permission and visibility failures
+- provider-managed field schemas
+
+The Jira connector does not need to reach feature parity with GitHub in the
+first implementation pass. It does need to exercise the same policy engine,
+external identity mapping, responsibility model, sync queue, and connector run
+observability.
 
 ## Benchmark And Production Readiness Gates
 

@@ -191,6 +191,145 @@ export type ConnectorSyncRunType = "outbound" | "inbound" | "reconciliation" | "
 export type ConnectorMappingStatus = "active" | "conflict" | "operator_review" | "archived";
 export type ConnectorSyncDirection = "github_to_unblock" | "unblock_to_github" | "bidirectional";
 export type ConnectorConflictPolicy = "github_wins" | "unblock_wins" | "last_writer_wins" | "operator_review";
+export type PrincipalKind = "user" | "team" | "service_account" | "bot";
+export type ExternalIdentityConfidence = "verified" | "inferred" | "unmapped";
+export type TaskResponsibilityRole = "owner" | "reviewer" | "watcher";
+export type DelegationTargetKind = "track" | "actor_pool" | "principal";
+export type ConnectorSyncPreset = "mirror_external_work" | "execution_layer" | "bidirectional_project_sync";
+export type ConnectorFieldSyncMode = "disabled" | "manual" | "inbound_only" | "outbound_only" | "bidirectional" | "append_only" | "unblock_owned" | "external_owned";
+export type ConnectorFieldConflictPolicy = "external_wins" | "unblock_wins" | "last_writer_wins" | "manual_review" | "blocked";
+export type ConnectorSyncDecisionKind = "noop" | "apply_inbound" | "apply_outbound" | "manual_review" | "ignore" | "blocked";
+export type ConnectorSyncQueueItemStatus = "pending" | "auto_applying" | "blocked" | "manual_review" | "ignored" | "resolved" | "failed";
+export type ConnectorSyncQueueSeverity = "info" | "warning" | "error";
+
+export interface Principal {
+  tenantId: string;
+  id: string;
+  kind: PrincipalKind;
+  displayName: string;
+  email: string | null;
+  createdAt: string;
+  updatedAt: string;
+  disabledAt: string | null;
+}
+
+export interface ExternalIdentity {
+  tenantId: string;
+  connectionId: string;
+  provider: string;
+  externalKind: "user" | "team" | "bot" | "service_account";
+  externalId: string;
+  externalDisplayName: string | null;
+  externalEmail: string | null;
+  principalId: string | null;
+  confidence: ExternalIdentityConfidence;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskResponsibility {
+  tenantId: string;
+  projectId: string;
+  taskId: string;
+  principalId: string;
+  role: TaskResponsibilityRole;
+  source: "manual" | "connector" | "delegation";
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+}
+
+export interface DelegationRule {
+  tenantId: string;
+  projectId: string;
+  id: string;
+  principalId: string;
+  targetKind: DelegationTargetKind;
+  targetId: string;
+  scopeQuery: string | null;
+  priority: number;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+}
+
+export interface ConnectorFieldPolicy {
+  field: string;
+  mode: ConnectorFieldSyncMode;
+  conflictPolicy?: ConnectorFieldConflictPolicy | undefined;
+  outboundAction?: string | null | undefined;
+  requiredExternalDefaults?: Record<string, unknown> | undefined;
+  notes?: string | undefined;
+}
+
+export interface ConnectorSyncPolicy {
+  preset: ConnectorSyncPreset;
+  provider: string;
+  objectKind: string;
+  fields: Record<string, ConnectorFieldPolicy>;
+}
+
+export interface ConnectorSyncPolicyRecord {
+  projectId: string;
+  id: string;
+  connectionId: string;
+  name: string;
+  scopeQuery: string | null;
+  priority: number;
+  enabled: boolean;
+  policy: ConnectorSyncPolicy;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+}
+
+export interface ConnectorFieldDiff {
+  field: string;
+  externalValue: unknown;
+  localValue: unknown;
+  externalVersion?: string | null | undefined;
+  localVersion?: string | null | undefined;
+  externalUpdatedAt?: string | null | undefined;
+  localUpdatedAt?: string | null | undefined;
+  reason?: string | undefined;
+}
+
+export interface ConnectorSyncDecision {
+  kind: ConnectorSyncDecisionKind;
+  field: string;
+  policy: ConnectorFieldPolicy;
+  reason: string;
+  confidence: "high" | "medium" | "low";
+  diff?: ConnectorFieldDiff | undefined;
+  proposedValue?: unknown;
+  blockedBy?: string | undefined;
+}
+
+export interface ConnectorSyncQueueItem {
+  projectId: string;
+  id: string;
+  connectionId: string;
+  mappingId: string | null;
+  externalKind: string;
+  externalId: string;
+  localKind: string;
+  localId: string;
+  status: ConnectorSyncQueueItemStatus;
+  severity: ConnectorSyncQueueSeverity;
+  detectedAt: string;
+  resolvedAt: string | null;
+  decision: ConnectorSyncDecision;
+  externalSnapshot: Record<string, unknown>;
+  localSnapshot: Record<string, unknown>;
+  diff: ConnectorFieldDiff;
+  policyRef: {
+    preset: ConnectorSyncPreset;
+    policyId: string | null;
+    scopeQuery: string | null;
+  };
+  error: Record<string, unknown> | null;
+}
 
 export interface ConnectorConnection {
   projectId: string;

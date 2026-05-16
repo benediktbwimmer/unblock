@@ -56,6 +56,11 @@ describe("GitHub connector auth model", () => {
         installationId: "456",
         repositoryOwner: "acme",
         repositoryName: "repo",
+        syncPreset: "execution_layer",
+        fieldPolicies: {
+          title: { mode: "inbound_only" },
+          execution_assignment: { mode: "unblock_owned" },
+        },
         conflictPolicy: "operator_review",
       },
     });

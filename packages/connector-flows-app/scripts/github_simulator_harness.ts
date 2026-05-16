@@ -8,6 +8,7 @@ import {
   startLocalPrismFlowsRuntime,
   stopLocalPrismFlowsRuntime,
 } from "../../../../prism-new3/packages/prism-flows/local-runtime.ts";
+import { normalizeGitHubIssueWebhook } from "../helpers/github-connector.ts";
 
 type Env = Record<string, string | undefined>;
 
@@ -15,6 +16,7 @@ export type HarnessMode =
   | "e2e"
   | "benchmark-reconcile"
   | "benchmark-webhook"
+  | "benchmark-direct-inbox"
   | "benchmark-direct-webhook";
 
 export interface HarnessOptions {
@@ -44,17 +46,44 @@ export interface HarnessResult {
     issueCount: number;
     elapsedMs: number;
     throughputPerSecond: number;
+    webhookSubmitMs?: number;
+    taskVisibleElapsedMs?: number;
+    taskVisibleThroughputPerSecond?: number;
+    effectCompleteElapsedMs?: number;
+    effectCompleteThroughputPerSecond?: number;
+    workflowCompleteElapsedMs?: number;
+    workflowCompleteThroughputPerSecond?: number;
     diagnosticsMs?: number;
     taskCount: number;
     taskCreatedSpanMs?: number | null;
+    taskCreatedOffsetP50Ms?: number | null;
+    taskCreatedOffsetP95Ms?: number | null;
+    inboxCreatedSpanMs?: number | null;
+    inboxAppliedSpanMs?: number | null;
+    inboxApplyLagP50Ms?: number | null;
+    inboxApplyLagP95Ms?: number | null;
     inboxEventCount?: number;
     inboxEventsWithMapping?: number;
     connectorMappingCount?: number;
+    connectorMappingCreatedSpanMs?: number | null;
+    connectorMappingUpdatedSpanMs?: number | null;
+    activityCount?: number;
+    activityCreatedSpanMs?: number | null;
     hostedAuditCount?: number;
     prismWorkflowCount?: number;
     prismWorkflowCompletedCount?: number;
     prismWorkflowStartSpanMs?: number | null;
+    prismWorkflowIntentSpanMs?: number | null;
+    prismWorkflowLeaseSpanMs?: number | null;
+    prismWorkflowResultSpanMs?: number | null;
+    prismWorkflowTerminalSpanMs?: number | null;
     prismWorkflowRuntimeSpanMs?: number | null;
+    prismWorkflowStartToIntentP50Ms?: number | null;
+    prismWorkflowStartToIntentP95Ms?: number | null;
+    prismWorkflowResultToTerminalP50Ms?: number | null;
+    prismWorkflowResultToTerminalP95Ms?: number | null;
+    prismWorkflowStartToTerminalP50Ms?: number | null;
+    prismWorkflowStartToTerminalP95Ms?: number | null;
     prismWorkflowShardCount?: number;
     prismWorkflowStatusCounts?: Record<string, number>;
     prismEffectCount?: number;
@@ -72,6 +101,11 @@ export interface HarnessResult {
       total: number;
       ok: number;
       failed: number;
+      submitWallMs?: number;
+      latencyP50Ms?: number;
+      latencyP95Ms?: number;
+      latencyP99Ms?: number;
+      latencyMaxMs?: number;
     };
   };
   diagnostics?: string[];
@@ -91,7 +125,7 @@ export function parseHarnessOptions(
     (flags.has("benchmark") ? "benchmark-reconcile" : "e2e");
   if (!isHarnessMode(mode)) {
     throw new Error(
-      `Unsupported mode ${mode}. Expected e2e, benchmark-reconcile, benchmark-webhook, or benchmark-direct-webhook.`,
+      `Unsupported mode ${mode}. Expected e2e, benchmark-reconcile, benchmark-webhook, benchmark-direct-inbox, or benchmark-direct-webhook.`,
     );
   }
   return {
@@ -261,11 +295,15 @@ export async function runGithubSimulatorHarness(
 
     unblock = await timed(steps, "unblock.start", async () => {
       if (options.unblockServerMode === "dist") {
-        await timed(steps, "unblock.build", () =>
-          runCommand("npm", ["run", "build", "-w", "@unblock/server"], {
-            cwd: repoRoot(),
-            env: commonEnv,
-          }));
+        await timed(
+          steps,
+          "unblock.build",
+          () =>
+            runCommand("npm", ["run", "build", "-w", "@unblock/server"], {
+              cwd: repoRoot(),
+              env: commonEnv,
+            }),
+        );
       }
       const serverCommand = options.unblockServerMode === "dist"
         ? {
@@ -411,6 +449,16 @@ export async function runGithubSimulatorHarness(
         simulator,
         timeoutMs: options.timeoutMs,
         issueCreateConcurrency: options.issueCreateConcurrency,
+      })
+      : options.mode === "benchmark-direct-inbox"
+      ? await runDirectInboxBenchmark({
+        env: smokeEnv,
+        steps,
+        issueCount: options.issueCount,
+        owner,
+        repo,
+        timeoutMs: options.timeoutMs,
+        concurrency: options.issueCreateConcurrency,
       })
       : await runDirectWebhookBenchmark({
         env: smokeEnv,
@@ -589,7 +637,8 @@ async function runWebhookBenchmark(input: {
   await timed(
     input.steps,
     "prism.effects.wait",
-    () => waitForPrismEffectResults(input.env, input.issueCount, input.timeoutMs),
+    () =>
+      waitForPrismEffectResults(input.env, input.issueCount, input.timeoutMs),
   );
   await timed(
     input.steps,
@@ -608,6 +657,111 @@ async function runWebhookBenchmark(input: {
     throughputPerSecond: perSecond(taskCount, elapsedMs),
     taskCount,
     webhookDeliveries,
+  };
+}
+
+async function runDirectInboxBenchmark(input: {
+  env: Env;
+  steps: SmokeStep[];
+  issueCount: number;
+  owner: string;
+  repo: string;
+  timeoutMs: number;
+  concurrency: number;
+}) {
+  const baseUrl = required(input.env, "UNBLOCK_HOSTED_API_URL");
+  const tenantId = required(input.env, "UNBLOCK_TENANT_ID");
+  const projectId = required(input.env, "UNBLOCK_PROJECT_ID");
+  const connectionId = required(input.env, "UNBLOCK_GITHUB_CONNECTION_ID");
+  const headers = trustedHeaders(tenantId);
+  const started = performance.now();
+  const deliveries = await timed(
+    input.steps,
+    "unblock.inbox.post_direct",
+    async () => {
+      const results: Array<{ ok: boolean; status?: number; error?: string }> =
+        Array.from({ length: input.issueCount }, () => ({ ok: false }));
+      const latencies: number[] = [];
+      const postStarted = performance.now();
+      await mapConcurrent(
+        Array.from({ length: input.issueCount }, (_, index) => index),
+        input.concurrency,
+        async (index) => {
+          const issueNumber = index + 1;
+          try {
+            const normalized: any = normalizeGitHubIssueWebhook({
+              deliveryId: `direct-inbox-${projectId}-${issueNumber}`,
+              event: "issues",
+              scope: {
+                tenantId,
+                projectId,
+                connectionId,
+                provider: "github",
+              },
+              payload: directGitHubIssueWebhookPayload({
+                owner: input.owner,
+                repo: input.repo,
+                issueNumber,
+              }),
+            });
+            const requestStarted = performance.now();
+            const response = await fetch(`${baseUrl}/api/connectors/inbox`, {
+              method: "POST",
+              headers: { ...headers, "content-type": "application/json" },
+              body: JSON.stringify({
+                ...normalized.event,
+                mapping: normalized.mapping,
+              }),
+            });
+            await response.body?.cancel();
+            latencies.push(performance.now() - requestStarted);
+            results[index] = { ok: response.ok, status: response.status };
+          } catch (error) {
+            results[index] = {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+        },
+      );
+      const failed = results.filter((result) => !result.ok);
+      if (failed.length > 0) {
+        throw new Error(
+          `${failed.length}/${results.length} direct inbox posts failed: ${
+            failed
+              .slice(0, 3)
+              .map((result) => result.error ?? `HTTP ${result.status}`)
+              .join("; ")
+          }`,
+        );
+      }
+      return {
+        total: results.length,
+        ok: results.filter((result) => result.ok).length,
+        failed: failed.length,
+        submitWallMs: Math.round(performance.now() - postStarted),
+        latencyP50Ms: percentileMs(latencies, 0.50),
+        latencyP95Ms: percentileMs(latencies, 0.95),
+        latencyP99Ms: percentileMs(latencies, 0.99),
+        latencyMaxMs: Math.round(Math.max(0, ...latencies)),
+      };
+    },
+  );
+  const taskCount = await timed(
+    input.steps,
+    "unblock.tasks.wait",
+    () => waitForTaskCount(input.env, input.issueCount, input.timeoutMs),
+  );
+  const elapsedMs = Math.round(performance.now() - started);
+  return {
+    issueCount: input.issueCount,
+    elapsedMs,
+    throughputPerSecond: perSecond(taskCount, elapsedMs),
+    taskCount,
+    webhookDeliveries: deliveries,
+    webhookSubmitMs: deliveries.submitWallMs,
+    taskVisibleElapsedMs: elapsedMs,
+    taskVisibleThroughputPerSecond: perSecond(taskCount, elapsedMs),
   };
 }
 
@@ -643,11 +797,17 @@ async function runDirectWebhookBenchmark(input: {
       "unblock.tasks.wait",
       () => waitForTaskCount(input.env, input.issueCount, input.timeoutMs),
     );
+    const taskVisibleElapsedMs = Math.round(
+      postResult.submitWallMs + (performance.now() - waitStarted),
+    );
     await timed(
       input.steps,
       "prism.effects.wait",
       () =>
         waitForPrismEffectResults(input.env, input.issueCount, input.timeoutMs),
+    );
+    const effectCompleteElapsedMs = Math.round(
+      postResult.submitWallMs + (performance.now() - waitStarted),
     );
     await timed(
       input.steps,
@@ -671,7 +831,25 @@ async function runDirectWebhookBenchmark(input: {
         total: postResult.total,
         ok: postResult.ok,
         failed: postResult.failed,
+        submitWallMs: postResult.submitWallMs,
+        latencyP50Ms: postResult.latencyP50Ms,
+        latencyP95Ms: postResult.latencyP95Ms,
+        latencyP99Ms: postResult.latencyP99Ms,
+        latencyMaxMs: postResult.latencyMaxMs,
       },
+      webhookSubmitMs: postResult.submitWallMs,
+      taskVisibleElapsedMs,
+      taskVisibleThroughputPerSecond: perSecond(
+        taskCount,
+        taskVisibleElapsedMs,
+      ),
+      effectCompleteElapsedMs,
+      effectCompleteThroughputPerSecond: perSecond(
+        taskCount,
+        effectCompleteElapsedMs,
+      ),
+      workflowCompleteElapsedMs: elapsedMs,
+      workflowCompleteThroughputPerSecond: perSecond(taskCount, elapsedMs),
     };
   }
   const requests = await Promise.all(
@@ -696,18 +874,22 @@ async function runDirectWebhookBenchmark(input: {
     async () => {
       const results: Array<{ ok: boolean; status?: number; error?: string }> =
         Array.from({ length: input.issueCount }, () => ({ ok: false }));
+      const latencies: number[] = [];
+      const postStarted = performance.now();
       await mapConcurrent(
         Array.from({ length: input.issueCount }, (_, index) => index),
         input.webhookConcurrency,
         async (index) => {
           try {
             const request = requests[index];
+            const requestStarted = performance.now();
             const response = await fetch(webhookUrl, {
               method: "POST",
               headers: request.headers,
               body: request.body,
             });
             await response.body?.cancel();
+            latencies.push(performance.now() - requestStarted);
             results[index] = { ok: response.ok, status: response.status };
           } catch (error) {
             results[index] = {
@@ -732,6 +914,11 @@ async function runDirectWebhookBenchmark(input: {
         total: results.length,
         ok: results.filter((result) => result.ok).length,
         failed: failed.length,
+        submitWallMs: Math.round(performance.now() - postStarted),
+        latencyP50Ms: percentileMs(latencies, 0.50),
+        latencyP95Ms: percentileMs(latencies, 0.95),
+        latencyP99Ms: percentileMs(latencies, 0.99),
+        latencyMaxMs: Math.round(Math.max(0, ...latencies)),
       };
     },
   );
@@ -740,11 +927,14 @@ async function runDirectWebhookBenchmark(input: {
     "unblock.tasks.wait",
     () => waitForTaskCount(input.env, input.issueCount, input.timeoutMs),
   );
+  const taskVisibleElapsedMs = Math.round(performance.now() - started);
   await timed(
     input.steps,
     "prism.effects.wait",
-    () => waitForPrismEffectResults(input.env, input.issueCount, input.timeoutMs),
+    () =>
+      waitForPrismEffectResults(input.env, input.issueCount, input.timeoutMs),
   );
+  const effectCompleteElapsedMs = Math.round(performance.now() - started);
   await timed(
     input.steps,
     "prism.workflows.wait",
@@ -762,6 +952,18 @@ async function runDirectWebhookBenchmark(input: {
     throughputPerSecond: perSecond(taskCount, elapsedMs),
     taskCount,
     webhookDeliveries: deliveryResults,
+    webhookSubmitMs: input.steps.find((step) =>
+      step.name === "github.webhooks.post_direct"
+    )?.ms,
+    taskVisibleElapsedMs,
+    taskVisibleThroughputPerSecond: perSecond(taskCount, taskVisibleElapsedMs),
+    effectCompleteElapsedMs,
+    effectCompleteThroughputPerSecond: perSecond(
+      taskCount,
+      effectCompleteElapsedMs,
+    ),
+    workflowCompleteElapsedMs: elapsedMs,
+    workflowCompleteThroughputPerSecond: perSecond(taskCount, elapsedMs),
   };
 }
 
@@ -840,6 +1042,10 @@ async function postDirectWebhooksWithNode(input: {
   ok: number;
   failed: number;
   submitWallMs: number;
+  latencyP50Ms: number;
+  latencyP95Ms: number;
+  latencyP99Ms: number;
+  latencyMaxMs: number;
 }> {
   const script = String.raw`
 import { createHmac } from "node:crypto";
@@ -903,6 +1109,7 @@ const requests = Array.from({ length: input.issueCount }, (_item, index) => sign
 let next = 0;
 let ok = 0;
 let failed = 0;
+const latencies = [];
 const started = performance.now();
 async function worker() {
   while (true) {
@@ -910,12 +1117,14 @@ async function worker() {
     if (index >= requests.length) return;
     const request = requests[index];
     try {
+      const requestStarted = performance.now();
       const response = await fetch(input.webhookUrl, {
         method: "POST",
         headers: request.headers,
         body: request.body,
       });
       await response.body?.cancel();
+      latencies.push(performance.now() - requestStarted);
       if (response.ok) ok += 1;
       else failed += 1;
     } catch {
@@ -924,11 +1133,21 @@ async function worker() {
   }
 }
 await Promise.all(Array.from({ length: Math.min(input.concurrency, input.issueCount) }, () => worker()));
+latencies.sort((left, right) => left - right);
+function percentile(fraction) {
+  if (latencies.length === 0) return 0;
+  const index = Math.min(latencies.length - 1, Math.max(0, Math.ceil(latencies.length * fraction) - 1));
+  return Math.round(latencies[index]);
+}
 console.log(JSON.stringify({
   total: input.issueCount,
   ok,
   failed,
   submitWallMs: Math.round(performance.now() - started),
+  latencyP50Ms: percentile(0.50),
+  latencyP95Ms: percentile(0.95),
+  latencyP99Ms: percentile(0.99),
+  latencyMaxMs: Math.round(latencies.at(-1) ?? 0),
 }));
 `;
   const output = await new Deno.Command("node", {
@@ -955,6 +1174,10 @@ console.log(JSON.stringify({
     ok: number;
     failed: number;
     submitWallMs: number;
+    latencyP50Ms: number;
+    latencyP95Ms: number;
+    latencyP99Ms: number;
+    latencyMaxMs: number;
   };
   if (parsed.failed > 0 || parsed.ok !== parsed.total) {
     throw new Error(`Node direct webhook client failures: ${stdout}`);
@@ -1256,15 +1479,57 @@ async function collectUnblockBenchmarkDiagnostics(
   const rows = await psqlRows(
     postgresUrl,
     `
-      select 'task_count', count(*)::text from tasks where project_id = ${projectLiteral} and id like 'GH-%'
+      with task_rows as (
+        select *
+        from tasks
+        where project_id = ${projectLiteral} and id like 'GH-%'
+      ),
+      inbox_rows as (
+        select *
+        from inbox_events
+        where project_id = ${projectLiteral}
+      ),
+      mapping_rows as (
+        select *
+        from connector_external_mappings
+        where project_id = ${projectLiteral}
+      ),
+      activity_rows as (
+        select *
+        from activity
+        where project_id = ${projectLiteral}
+          and subject_type = 'task'
+          and subject_id like 'GH-%'
+      )
+      select 'task_count', count(*)::text from task_rows
       union all
-      select 'task_span_ms', coalesce(round(extract(epoch from max(created_at)-min(created_at))*1000)::bigint, 0)::text from tasks where project_id = ${projectLiteral} and id like 'GH-%'
+      select 'task_span_ms', coalesce(round(extract(epoch from max(created_at)-min(created_at))*1000)::bigint, 0)::text from task_rows
       union all
-      select 'inbox_event_count', count(*)::text from inbox_events where project_id = ${projectLiteral}
+      select 'task_created_offset_p50_ms', coalesce(round(percentile_cont(0.50) within group (order by extract(epoch from created_at - (select min(created_at) from task_rows))*1000))::bigint, 0)::text from task_rows
       union all
-      select 'inbox_events_with_mapping', (count(*) filter (where payload_json ? 'mapping'))::text from inbox_events where project_id = ${projectLiteral}
+      select 'task_created_offset_p95_ms', coalesce(round(percentile_cont(0.95) within group (order by extract(epoch from created_at - (select min(created_at) from task_rows))*1000))::bigint, 0)::text from task_rows
       union all
-      select 'connector_mapping_count', count(*)::text from connector_external_mappings where project_id = ${projectLiteral}
+      select 'inbox_event_count', count(*)::text from inbox_rows
+      union all
+      select 'inbox_created_span_ms', coalesce(round(extract(epoch from max(created_at)-min(created_at))*1000)::bigint, 0)::text from inbox_rows
+      union all
+      select 'inbox_applied_span_ms', coalesce(round(extract(epoch from max(applied_at)-min(applied_at))*1000)::bigint, 0)::text from inbox_rows where applied_at is not null
+      union all
+      select 'inbox_apply_lag_p50_ms', coalesce(round(percentile_cont(0.50) within group (order by extract(epoch from applied_at-created_at)*1000))::bigint, 0)::text from inbox_rows where applied_at is not null
+      union all
+      select 'inbox_apply_lag_p95_ms', coalesce(round(percentile_cont(0.95) within group (order by extract(epoch from applied_at-created_at)*1000))::bigint, 0)::text from inbox_rows where applied_at is not null
+      union all
+      select 'inbox_events_with_mapping', (count(*) filter (where payload_json ? 'mapping'))::text from inbox_rows
+      union all
+      select 'connector_mapping_count', count(*)::text from mapping_rows
+      union all
+      select 'connector_mapping_created_span_ms', coalesce(round(extract(epoch from max(created_at)-min(created_at))*1000)::bigint, 0)::text from mapping_rows
+      union all
+      select 'connector_mapping_updated_span_ms', coalesce(round(extract(epoch from max(updated_at)-min(updated_at))*1000)::bigint, 0)::text from mapping_rows
+      union all
+      select 'activity_count', count(*)::text from activity_rows
+      union all
+      select 'activity_created_span_ms', coalesce(round(extract(epoch from max(created_at)-min(created_at))*1000)::bigint, 0)::text from activity_rows
       union all
       select 'hosted_audit_count', count(*)::text from hosted_audit_events where project_id = ${projectLiteral}
     `,
@@ -1275,9 +1540,23 @@ async function collectUnblockBenchmarkDiagnostics(
   }));
   return {
     taskCreatedSpanMs: values.get("task_span_ms") ?? null,
+    taskCreatedOffsetP50Ms: values.get("task_created_offset_p50_ms") ?? null,
+    taskCreatedOffsetP95Ms: values.get("task_created_offset_p95_ms") ?? null,
+    inboxCreatedSpanMs: values.get("inbox_created_span_ms") ?? null,
+    inboxAppliedSpanMs: values.get("inbox_applied_span_ms") ?? null,
+    inboxApplyLagP50Ms: values.get("inbox_apply_lag_p50_ms") ?? null,
+    inboxApplyLagP95Ms: values.get("inbox_apply_lag_p95_ms") ?? null,
     inboxEventCount: values.get("inbox_event_count") ?? 0,
     inboxEventsWithMapping: values.get("inbox_events_with_mapping") ?? 0,
     connectorMappingCount: values.get("connector_mapping_count") ?? 0,
+    connectorMappingCreatedSpanMs: values.get(
+      "connector_mapping_created_span_ms",
+    ) ?? null,
+    connectorMappingUpdatedSpanMs: values.get(
+      "connector_mapping_updated_span_ms",
+    ) ?? null,
+    activityCount: values.get("activity_count") ?? 0,
+    activityCreatedSpanMs: values.get("activity_created_span_ms") ?? null,
     hostedAuditCount: values.get("hosted_audit_count") ?? 0,
   };
 }
@@ -1320,6 +1599,14 @@ async function collectPrismBenchmarkDiagnostics(
         where workflow_key is not null
         group by workflow_key
       ),
+      workflow_first_states as (
+        select
+          payload #>> '{WorkflowState,operations,0,workflow_key}' as workflow_key,
+          min(occurred_at_ms) as first_state_at_ms
+        from flow_log
+        where record_kind = 'workflow.state'
+        group by payload #>> '{WorkflowState,operations,0,workflow_key}'
+      ),
       workflow_latest_states as (
         select distinct on (workflow_key)
           workflow_key,
@@ -1336,8 +1623,17 @@ async function collectPrismBenchmarkDiagnostics(
         where workflow_key is not null
         order by workflow_key, occurred_at_ms desc
       ),
+      workflow_terminals as (
+        select workflow_key, occurred_at_ms as terminal_at_ms
+        from workflow_latest_states
+        where status = 'succeeded'
+      ),
       effect_intents as (
-        select causation_id, payload_schema, occurred_at_ms
+        select
+          causation_id,
+          substring(causation_id from '^workflow:(.*):effect:flow-js:') as workflow_key,
+          payload_schema,
+          occurred_at_ms
         from flow_log
         where record_kind = 'effect.intent'
       ),
@@ -1359,18 +1655,36 @@ async function collectPrismBenchmarkDiagnostics(
       effect_timings as (
         select
           intents.causation_id,
+          starts.started_at_ms,
+          intents.occurred_at_ms as intent_at_ms,
+          leases.occurred_at_ms as lease_at_ms,
+          results.occurred_at_ms as result_at_ms,
+          terminals.terminal_at_ms,
+          intents.occurred_at_ms - starts.started_at_ms as start_to_intent_ms,
           leases.occurred_at_ms - intents.occurred_at_ms as queue_ms,
           results.occurred_at_ms - leases.occurred_at_ms as run_ms,
-          results.occurred_at_ms - intents.occurred_at_ms as total_ms
+          results.occurred_at_ms - intents.occurred_at_ms as total_ms,
+          terminals.terminal_at_ms - results.occurred_at_ms as result_to_terminal_ms,
+          terminals.terminal_at_ms - starts.started_at_ms as start_to_terminal_ms
         from effect_intents intents
+        join workflow_starts starts on starts.workflow_key = intents.workflow_key
         join effect_leases leases using (causation_id)
         join effect_results results using (causation_id)
+        left join workflow_terminals terminals on terminals.workflow_key = intents.workflow_key
       )
       select 'prism_workflow_count', count(*)::text from workflow_starts
       union all
       select 'prism_workflow_completed_count', count(*)::text from completed_workflows
       union all
       select 'prism_workflow_start_span_ms', coalesce(max(started_at_ms)-min(started_at_ms), 0)::text from workflow_starts
+      union all
+      select 'prism_workflow_intent_span_ms', coalesce(max(occurred_at_ms)-min(occurred_at_ms), 0)::text from effect_intents
+      union all
+      select 'prism_workflow_lease_span_ms', coalesce(max(occurred_at_ms)-min(occurred_at_ms), 0)::text from effect_leases
+      union all
+      select 'prism_workflow_result_span_ms', coalesce(max(occurred_at_ms)-min(occurred_at_ms), 0)::text from effect_results
+      union all
+      select 'prism_workflow_terminal_span_ms', coalesce(max(terminal_at_ms)-min(terminal_at_ms), 0)::text from workflow_terminals
       union all
       select 'prism_workflow_runtime_span_ms', coalesce((select max(occurred_at_ms) from effect_results) - (select min(started_at_ms) from workflow_starts), 0)::text
       union all
@@ -1381,6 +1695,10 @@ async function collectPrismBenchmarkDiagnostics(
       select 'prism_effect_completed_count', count(*)::text from effect_results
       union all
       select 'prism_effect_span_ms', coalesce(max(occurred_at_ms)-min(occurred_at_ms), 0)::text from flow_log where record_kind like 'effect.%'
+      union all
+      select 'prism_workflow_start_to_intent_p50_ms', coalesce(round(percentile_cont(0.50) within group (order by start_to_intent_ms))::bigint, 0)::text from effect_timings
+      union all
+      select 'prism_workflow_start_to_intent_p95_ms', coalesce(round(percentile_cont(0.95) within group (order by start_to_intent_ms))::bigint, 0)::text from effect_timings
       union all
       select 'prism_effect_queue_p50_ms', coalesce(round(percentile_cont(0.50) within group (order by queue_ms))::bigint, 0)::text from effect_timings
       union all
@@ -1393,6 +1711,14 @@ async function collectPrismBenchmarkDiagnostics(
       select 'prism_effect_total_p50_ms', coalesce(round(percentile_cont(0.50) within group (order by total_ms))::bigint, 0)::text from effect_timings
       union all
       select 'prism_effect_total_p95_ms', coalesce(round(percentile_cont(0.95) within group (order by total_ms))::bigint, 0)::text from effect_timings
+      union all
+      select 'prism_workflow_result_to_terminal_p50_ms', coalesce(round(percentile_cont(0.50) within group (order by result_to_terminal_ms))::bigint, 0)::text from effect_timings where result_to_terminal_ms is not null
+      union all
+      select 'prism_workflow_result_to_terminal_p95_ms', coalesce(round(percentile_cont(0.95) within group (order by result_to_terminal_ms))::bigint, 0)::text from effect_timings where result_to_terminal_ms is not null
+      union all
+      select 'prism_workflow_start_to_terminal_p50_ms', coalesce(round(percentile_cont(0.50) within group (order by start_to_terminal_ms))::bigint, 0)::text from effect_timings where start_to_terminal_ms is not null
+      union all
+      select 'prism_workflow_start_to_terminal_p95_ms', coalesce(round(percentile_cont(0.95) within group (order by start_to_terminal_ms))::bigint, 0)::text from effect_timings where start_to_terminal_ms is not null
     `,
   );
   const values = new Map(rows.map((row) => {
@@ -1408,8 +1734,35 @@ async function collectPrismBenchmarkDiagnostics(
     prismWorkflowCompletedCount: workflowCompleted,
     prismWorkflowStartSpanMs: values.get("prism_workflow_start_span_ms") ??
       null,
+    prismWorkflowIntentSpanMs: values.get("prism_workflow_intent_span_ms") ??
+      null,
+    prismWorkflowLeaseSpanMs: values.get("prism_workflow_lease_span_ms") ??
+      null,
+    prismWorkflowResultSpanMs: values.get("prism_workflow_result_span_ms") ??
+      null,
+    prismWorkflowTerminalSpanMs: values.get(
+      "prism_workflow_terminal_span_ms",
+    ) ?? null,
     prismWorkflowRuntimeSpanMs: values.get("prism_workflow_runtime_span_ms") ??
       null,
+    prismWorkflowStartToIntentP50Ms: values.get(
+      "prism_workflow_start_to_intent_p50_ms",
+    ) ?? null,
+    prismWorkflowStartToIntentP95Ms: values.get(
+      "prism_workflow_start_to_intent_p95_ms",
+    ) ?? null,
+    prismWorkflowResultToTerminalP50Ms: values.get(
+      "prism_workflow_result_to_terminal_p50_ms",
+    ) ?? null,
+    prismWorkflowResultToTerminalP95Ms: values.get(
+      "prism_workflow_result_to_terminal_p95_ms",
+    ) ?? null,
+    prismWorkflowStartToTerminalP50Ms: values.get(
+      "prism_workflow_start_to_terminal_p50_ms",
+    ) ?? null,
+    prismWorkflowStartToTerminalP95Ms: values.get(
+      "prism_workflow_start_to_terminal_p95_ms",
+    ) ?? null,
     prismWorkflowShardCount: values.get("prism_workflow_shard_count") ?? 0,
     prismWorkflowStatusCounts: countStatusMap(workflowCount, workflowCompleted),
     prismEffectCount: effectCount,
@@ -1764,7 +2117,8 @@ function positiveInteger(value: string | undefined, fallback: number): number {
 
 function isHarnessMode(value: string): value is HarnessMode {
   return value === "e2e" || value === "benchmark-reconcile" ||
-    value === "benchmark-webhook" || value === "benchmark-direct-webhook";
+    value === "benchmark-webhook" || value === "benchmark-direct-inbox" ||
+    value === "benchmark-direct-webhook";
 }
 
 function parseUnblockServerMode(
@@ -1772,7 +2126,9 @@ function parseUnblockServerMode(
 ): HarnessOptions["unblockServerMode"] {
   if (!value) return "dist";
   if (value === "dist" || value === "dev") return value;
-  throw new Error(`Unsupported unblock server mode ${value}. Expected dist or dev.`);
+  throw new Error(
+    `Unsupported unblock server mode ${value}. Expected dist or dev.`,
+  );
 }
 
 function parseDirectWebhookClient(
@@ -1793,6 +2149,16 @@ function required(env: Env, key: string): string {
 
 function perSecond(count: number, elapsedMs: number): number {
   return Math.round((count / Math.max(1, elapsedMs)) * 1_000 * 100) / 100;
+}
+
+function percentileMs(values: number[], fraction: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.ceil(sorted.length * fraction) - 1),
+  );
+  return Math.round(sorted[index]);
 }
 
 async function mapConcurrent<T>(
