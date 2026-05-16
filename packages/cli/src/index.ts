@@ -1544,14 +1544,32 @@ async function prepareBenchmarkStore(
   }
 
   const tenantId = mode === "hosted" ? options.hostedTenantId.trim() || "bench-hosted-tenant" : undefined;
+  const store = await createPostgresStore(tenantId
+    ? { connectionString: postgresUrl, tenantId, autoMigrate: true }
+    : { connectionString: postgresUrl, autoMigrate: true });
+  if (tenantId) {
+    await ensureBenchmarkTenant(store, tenantId);
+  }
   return {
     skipped: false,
-    store: await createPostgresStore(tenantId
-      ? { connectionString: postgresUrl, tenantId, autoMigrate: true }
-      : { connectionString: postgresUrl, autoMigrate: true }),
+    store,
     database: redactDatabaseUrl(postgresUrl),
     tenantId
   };
+}
+
+async function ensureBenchmarkTenant(store: AppStore, tenantId: string): Promise<void> {
+  const exec = (store as { exec?: (sql: string) => Promise<void> }).exec;
+  if (!exec) return;
+  const slug = tenantId.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "benchmark";
+  await exec.call(store, `
+    insert into tenants (id, slug, name, created_at, updated_at, archived_at)
+    values (${sqlLiteral(tenantId)}, ${sqlLiteral(slug)}, ${sqlLiteral(`Benchmark ${tenantId}`)}, now(), now(), null)
+    on conflict (id) do update
+      set slug = excluded.slug,
+          name = excluded.name,
+          updated_at = now()
+  `);
 }
 
 function parseBenchmarkMatrixList<T extends string>(raw: string, allowed: readonly T[], label: string): T[] {
@@ -1580,6 +1598,10 @@ function redactDatabaseUrl(value: string): string {
   } catch {
     return value.replace(/:\/\/([^:@]+):([^@]+)@/, "://$1:REDACTED@");
   }
+}
+
+function sqlLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
 }
 
 function databaseLabel(): string {

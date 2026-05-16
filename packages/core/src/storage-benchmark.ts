@@ -493,7 +493,7 @@ export async function runConnectorWorkloadBenchmark(store: AppStore, options: Co
         connectionId,
         provider: "github",
         reason: `benchmark-${index}`,
-        runId: `RUN-${index.toString().padStart(6, "0")}`,
+        runId: randomUUID(),
         now
       });
     }

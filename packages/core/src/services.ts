@@ -1584,6 +1584,7 @@ interface ProjectReadSnapshot {
 
 export class QueryService {
   private snapshotCache: ProjectReadSnapshot | null = null;
+  private instructionMatchCache: { version: string; matches: InstructionMatch[] } | null = null;
 
   constructor(private readonly store: AppStore, private readonly projectId: string) {}
 
@@ -1870,16 +1871,16 @@ export class QueryService {
 
   async explain(idInput: string): Promise<DependencyExplanation> {
     const id = normalizeId(idInput);
-    const views = await this.list({ includeFinished: true, includeArchived: true });
+    const snapshot = await this.projectSnapshot();
+    const views = snapshot.views;
     const viewById = new Map(views.map((task) => [task.id, task]));
-    const dependencies = await this.store.dependencies.listForTask(this.projectId, id);
-    const allDependencies = await this.store.dependencies.list(this.projectId);
-    const directDependents = allDependencies
+    const directDependents = snapshot.activeDependencies
       .filter((dependency) => dependency.dependsOnTaskId === id)
       .map((dependency) => viewById.get(dependency.taskId))
       .filter((task): task is TaskView => Boolean(task && !task.archivedAt));
     const task = viewById.get(id) ?? notFound("task", id);
-    const dependencyViews = dependencies
+    const dependencyViews = snapshot.activeDependencies
+      .filter((dependency) => dependency.taskId === id)
       .map((dependency) => viewById.get(dependency.dependsOnTaskId))
       .filter((dependency): dependency is TaskView => Boolean(dependency && !dependency.archivedAt));
     const unfinishedDependencies = dependencyViews.filter((dependency) => dependency.lifecycle !== "finished");
@@ -1969,6 +1970,10 @@ export class QueryService {
   }
 
   async matchingInstructions(): Promise<InstructionMatch[]> {
+    const version = await this.projectReadVersion();
+    if (this.instructionMatchCache?.version === version) {
+      return this.instructionMatchCache.matches;
+    }
     const instructions = await this.store.instructions.list(this.projectId);
     const enabled = instructions.filter((instruction) => instruction.enabled && !instruction.archivedAt);
     const matches: InstructionMatch[] = [];
@@ -1985,7 +1990,7 @@ export class QueryService {
           }
         }
       }
-      return matches.sort((a, b) => a.instruction.name.localeCompare(b.instruction.name) || a.task.id.localeCompare(b.task.id));
+      return this.cacheInstructionMatches(version, matches);
     }
     const [tasks, dependencies] = await Promise.all([
       this.list({ includeArchived: true, includeFinished: true }),
@@ -1996,7 +2001,13 @@ export class QueryService {
         matches.push({ instruction, task: match.task, reasons: match.reasons });
       }
     }
-    return matches.sort((a, b) => a.instruction.name.localeCompare(b.instruction.name) || a.task.id.localeCompare(b.task.id));
+    return this.cacheInstructionMatches(version, matches);
+  }
+
+  private cacheInstructionMatches(version: string, matches: InstructionMatch[]): InstructionMatch[] {
+    const sorted = matches.sort((a, b) => a.instruction.name.localeCompare(b.instruction.name) || a.task.id.localeCompare(b.task.id));
+    this.instructionMatchCache = { version, matches: sorted };
+    return sorted;
   }
 
   async matchingInstructionIds(): Promise<Array<{ instructionId: string; taskId: string }>> {
