@@ -1887,7 +1887,7 @@ kbd {
 .time-axis {
   position: sticky;
   top: 0;
-  z-index: 2;
+  z-index: 8;
   height: 44px;
   border-bottom: 1px solid #d9dee8;
   background: #ffffff;
@@ -1895,7 +1895,7 @@ kbd {
 
 .time-axis-corner {
   left: 0;
-  z-index: 4;
+  z-index: 12;
   display: flex;
   align-items: center;
   padding: 0 14px;
@@ -1960,13 +1960,14 @@ kbd {
 .timeline-lane-label {
   position: sticky;
   left: 0;
-  z-index: 3;
+  z-index: 10;
   display: grid;
   align-content: start;
   gap: 4px;
   padding: 12px 14px;
   background: #ffffff;
   border-right: 1px solid #d9dee8;
+  box-shadow: 10px 0 16px rgb(16 24 40 / 8%);
 }
 
 .timeline-lane-label strong {
@@ -2000,6 +2001,55 @@ kbd {
   height: 32px;
   min-width: 10px;
   z-index: 3;
+}
+
+.timeline-session::after,
+.timeline-annotation::after,
+.timeline-marker::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 20;
+  max-width: 420px;
+  min-width: 180px;
+  width: max-content;
+  padding: 6px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #263244;
+  box-shadow: 0 10px 24px rgb(16 24 40 / 16%);
+  font-size: 12px;
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(2px);
+  transition: opacity 70ms ease, transform 70ms ease;
+}
+
+.timeline-session:hover::after,
+.timeline-session:focus-within::after,
+.timeline-annotation:hover::after,
+.timeline-annotation:focus-visible::after,
+.timeline-marker:hover::after,
+.timeline-marker:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.timeline-annotation::after,
+.timeline-marker::after {
+  left: 50%;
+  bottom: calc(100% + 7px);
+  transform: translate(-50%, 2px);
+}
+
+.timeline-annotation:hover::after,
+.timeline-annotation:focus-visible::after,
+.timeline-marker:hover::after,
+.timeline-marker:focus-visible::after {
+  transform: translate(-50%, 0);
 }
 
 .timeline-session-bar {
@@ -2685,6 +2735,15 @@ kbd {
     background: #202630;
     border-color: #465368;
     color: #aeb8c8;
+  }
+
+  .timeline-session::after,
+  .timeline-annotation::after,
+  .timeline-marker::after {
+    background: #202630;
+    border-color: #465368;
+    color: #edf2f7;
+    box-shadow: 0 10px 24px rgb(0 0 0 / 32%);
   }
 
   .activity-overlay-backdrop {

@@ -192,6 +192,15 @@ export interface SourceCoverage {
 export type ViewMode = "tasks" | "queues" | "tags" | "instructions" | "connectors" | "coverage" | "activity";
 export type StatusFilter = ComputedStatus;
 export type TaskAction = "start" | "finish" | "reopen" | "archive" | "restore";
+export type ActivityTimelineRange = "fit" | "6h" | "24h" | "7d" | "all";
+
+export interface ActivityUiState {
+  matcher: string;
+  appliedMatcher: string;
+  range: ActivityTimelineRange;
+  showEvents: boolean;
+  showRoutineEvents: boolean;
+}
 
 export interface AppConfig {
   identity: {
@@ -213,6 +222,7 @@ export interface UiState {
   search: string;
   matcher: string;
   selectedViewId: string;
+  activity: ActivityUiState;
   collapsedTaskIds: string[];
   scrollPositions: Record<string, number>;
   newProjectDraft: string;
@@ -296,6 +306,13 @@ export const DEFAULT_UI_STATE: UiState = {
   search: "",
   matcher: "",
   selectedViewId: "",
+  activity: {
+    matcher: "",
+    appliedMatcher: "",
+    range: "fit",
+    showEvents: false,
+    showRoutineEvents: false
+  },
   collapsedTaskIds: [],
   scrollPositions: {},
   newProjectDraft: "",

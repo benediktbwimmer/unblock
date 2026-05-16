@@ -3,7 +3,7 @@ import { Archive, Check, CircleDot, Edit3, Filter, GitBranch, ListChecks, Messag
 import { fetchJson, mutate, withProject } from "../api";
 import { DependencyItem, MarkdownContent, Metric, StatusDot } from "../components/common";
 import { TopMatcherEditor } from "../matcher/MatcherEditor";
-import type { ActivityRecord, CommentRecord, ComputedStatus, Explanation, MatcherGrammarRecord, TaskAction, TaskView } from "../types";
+import type { ActivityRecord, ActivityTimelineRange, ActivityUiState, CommentRecord, ComputedStatus, Explanation, MatcherGrammarRecord, TaskAction, TaskView } from "../types";
 import { formatActorRef } from "../utils/format";
 
 interface TimelineSession {
@@ -23,7 +23,7 @@ interface TimelineLane {
   latestAt: string;
 }
 
-type TimelineRange = "fit" | "6h" | "24h" | "7d" | "all";
+type TimelineRange = ActivityTimelineRange;
 
 interface TimelineWindow {
   start: Date;
@@ -35,21 +35,20 @@ export function ActivityView({
   initialActivity,
   projectId,
   grammar,
+  state,
+  onStateChange,
   onOpenTask
 }: {
   initialActivity: ActivityRecord[];
   projectId: string;
   grammar: MatcherGrammarRecord | null;
+  state: ActivityUiState;
+  onStateChange: (patch: Partial<ActivityUiState>) => void;
   onOpenTask: (task: TaskView) => void;
 }) {
   const [activity, setActivity] = useState(initialActivity);
-  const [matcher, setMatcher] = useState("");
-  const [appliedMatcher, setAppliedMatcher] = useState("");
   const [suggestSignal, setSuggestSignal] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [range, setRange] = useState<TimelineRange>("fit");
-  const [showEvents, setShowEvents] = useState(false);
-  const [showRoutineEvents, setShowRoutineEvents] = useState(false);
   const [selectedTask, setSelectedTask] = useState<TaskView | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<ActivityRecord | null>(null);
   const [drawerTask, setDrawerTask] = useState<TaskView | null>(null);
@@ -58,6 +57,11 @@ export function ActivityView({
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [drawerError, setDrawerError] = useState<string | null>(null);
   const timelineShellRef = useRef<HTMLDivElement | null>(null);
+  const matcher = state.matcher;
+  const appliedMatcher = state.appliedMatcher;
+  const range = state.range;
+  const showEvents = state.showEvents;
+  const showRoutineEvents = state.showRoutineEvents;
   const lanes = useMemo(() => buildTimelineLanes(activity), [activity]);
   const windowRange = useMemo(() => buildTimelineWindow(lanes, activity, range, showEvents), [activity, lanes, range, showEvents]);
   const ticks = useMemo(() => buildTimeTicks(windowRange, range), [range, windowRange]);
@@ -85,9 +89,19 @@ export function ActivityView({
   useEffect(() => {
     const element = timelineShellRef.current;
     if (element) {
-      element.scrollLeft = range === "fit" ? 0 : element.scrollWidth;
+      element.scrollLeft = element.scrollWidth;
     }
-  }, [range, visibleLanes.length, activity.length]);
+  }, [range, visibleLanes.length, activity.length, nowLeft, timelineWidth]);
+
+  useEffect(() => {
+    if (appliedMatcher.trim()) {
+      void loadActivity(appliedMatcher);
+    }
+  }, [projectId]);
+
+  function updateState(patch: Partial<ActivityUiState>) {
+    onStateChange(patch);
+  }
 
   async function loadActivity(nextMatcher = appliedMatcher) {
     setLoading(true);
@@ -98,7 +112,7 @@ export function ActivityView({
       }
       const next = await fetchJson<ActivityRecord[]>(`/api/activity?${params.toString()}`);
       setActivity(next);
-      setAppliedMatcher(nextMatcher.trim());
+      updateState({ appliedMatcher: nextMatcher.trim(), matcher: nextMatcher });
     } finally {
       setLoading(false);
     }
@@ -182,19 +196,19 @@ export function ActivityView({
             projectId={projectId}
             grammar={grammar}
             suggestSignal={suggestSignal}
-            onChange={setMatcher}
+            onChange={(nextMatcher) => updateState({ matcher: nextMatcher })}
             onApply={applyMatcher}
           />
           {!matcher ? <span className="matcher-placeholder">assigned = bw-mbp:codex-b or tag = backend</span> : null}
         </div>
         <span className="shortcut-hint matcher-shortcut"><kbd>Shift</kbd> + <kbd>Enter</kbd></span>
         <button className="primary-button" disabled={loading || matcher.trim() === appliedMatcher} onClick={applyMatcher}><Check size={16} /> Apply</button>
-        {appliedMatcher ? <button disabled={loading} onClick={() => { setMatcher(""); void loadActivity(""); }}>Clear</button> : null}
+        {appliedMatcher ? <button disabled={loading} onClick={() => { updateState({ matcher: "", appliedMatcher: "" }); void loadActivity(""); }}>Clear</button> : null}
         <button className="icon-button" disabled={loading} onClick={() => void loadActivity()} title="Refresh"><RefreshCw size={16} /></button>
         <div className="timeline-view-tabs" aria-label="Activity layers">
           <button className="active" title="Show task work sessions">Sessions</button>
-          <button className={showEvents ? "active" : ""} onClick={() => setShowEvents((value) => !value)} title="Show event annotations on the timeline">Events</button>
-          <button className={showRoutineEvents ? "active" : ""} disabled={!showEvents} onClick={() => setShowRoutineEvents((value) => !value)} title="Include routine task update events">Updates</button>
+          <button className={showEvents ? "active" : ""} onClick={() => updateState({ showEvents: !showEvents, showRoutineEvents: !showEvents ? showRoutineEvents : false })} title="Show event annotations on the timeline">Events</button>
+          <button className={showRoutineEvents ? "active" : ""} disabled={!showEvents} onClick={() => updateState({ showRoutineEvents: !showRoutineEvents })} title="Include routine task update events">Updates</button>
         </div>
         <div className="timeline-range-tabs" role="tablist" aria-label="Activity time range">
           {[
@@ -204,7 +218,7 @@ export function ActivityView({
             ["7d", "7d"],
             ["all", "All"]
           ].map(([value, label]) => (
-            <button key={value} className={range === value ? "active" : ""} onClick={() => setRange(value as TimelineRange)}>{label}</button>
+            <button key={value} className={range === value ? "active" : ""} onClick={() => updateState({ range: value as TimelineRange })}>{label}</button>
           ))}
         </div>
       </div>
@@ -248,10 +262,11 @@ export function ActivityView({
                         className={`timeline-session ${session.outcome} ${selectedTask?.id === session.task.id ? "selected" : ""}`}
                         key={session.id}
                         style={{ left: `${placement.left}%`, width: `${placement.width}%`, top: `${timelineSessionTop(track)}px` }}
+                        data-tooltip={`${session.task.id} · ${session.task.title} · ${formatTimeRange(session.startAt, session.endAt)} · ${formatDuration(session.startAt, session.endAt ?? new Date().toISOString())}`}
                       >
                         <button
                           className="timeline-session-bar"
-                          title={`${session.task.id} · ${formatTimeRange(session.startAt, session.endAt)} · ${formatDuration(session.startAt, session.endAt ?? new Date().toISOString())}`}
+                          aria-label={`${session.task.id} ${session.task.title}`}
                           onClick={() => void openActivityTask(session.task, session.events.at(-1) ?? null)}
                         >
                           <span>{session.task.id}</span>
@@ -265,7 +280,8 @@ export function ActivityView({
                             className={`timeline-annotation ${markerTone(event.type)} ${selectedEvent?.id === event.id ? "selected" : ""}`}
                             key={event.id}
                             style={{ left: `${sessionEventPercent(event, session, windowRange)}%` }}
-                            title={`${event.type}: ${event.message}`}
+                            data-tooltip={`${event.type}: ${event.message}`}
+                            aria-label={`${event.type}: ${event.message}`}
                             onClick={(clickEvent) => {
                               clickEvent.stopPropagation();
                               void openActivityTask(session.task, event);
@@ -282,7 +298,8 @@ export function ActivityView({
                       className={`timeline-marker point ${markerTone(event.type)} ${selectedEvent?.id === event.id ? "selected" : ""}`}
                       key={event.id}
                       style={{ left: `${timePercent(event.createdAt, windowRange)}%`, top: `${timelinePointTop(packedSessions.trackCount, pointIndex)}px` }}
-                      title={`${event.type}: ${event.message}`}
+                      data-tooltip={`${event.type}: ${event.message}`}
+                      aria-label={`${event.type}: ${event.message}`}
                       onClick={() => {
                         setSelectedEvent(event);
                         if (event.task) {

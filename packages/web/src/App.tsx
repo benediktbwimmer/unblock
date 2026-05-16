@@ -30,6 +30,7 @@ import { appliedFiltersFromUiState, normalizeAppConfig, sameAppliedFilters, useP
 import {
   DEFAULT_APP_CONFIG,
   type ActivityRecord,
+  type ActivityUiState,
   type AppConfig,
   type AppliedTaskFilters,
   type CommentRecord,
@@ -970,7 +971,16 @@ function App() {
 
         {uiState.mode === "connectors" ? <ConnectorsView projectId={uiState.projectId} onError={setError} /> : null}
         {uiState.mode === "coverage" ? <CoverageView coverage={coverage} /> : null}
-        {uiState.mode === "activity" ? <ActivityView initialActivity={activity} projectId={uiState.projectId} grammar={matcherGrammar} onOpenTask={(task) => openTask(task.id)} /> : null}
+        {uiState.mode === "activity" ? (
+          <ActivityView
+            initialActivity={activity}
+            projectId={uiState.projectId}
+            grammar={matcherGrammar}
+            state={uiState.activity}
+            onStateChange={(activityPatch: Partial<ActivityUiState>) => updateUiState((current) => ({ ...current, activity: { ...current.activity, ...activityPatch } }))}
+            onOpenTask={(task) => openTask(task.id)}
+          />
+        ) : null}
       </main>
     </div>
   );

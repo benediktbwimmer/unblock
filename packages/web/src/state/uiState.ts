@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { DEFAULT_APP_CONFIG, DEFAULT_STATUS_FILTERS, DEFAULT_UI_STATE, STATUS_FILTER_ORDER, UI_STATE_KEY, type AppConfig, type AppliedTaskFilters, type StatusFilter, type UiState, type ViewMode } from "../types";
+import { DEFAULT_APP_CONFIG, DEFAULT_STATUS_FILTERS, DEFAULT_UI_STATE, STATUS_FILTER_ORDER, UI_STATE_KEY, type ActivityTimelineRange, type ActivityUiState, type AppConfig, type AppliedTaskFilters, type StatusFilter, type UiState, type ViewMode } from "../types";
 
 export function appliedFiltersFromUiState(uiState: UiState): AppliedTaskFilters {
   return {
@@ -83,12 +83,30 @@ function normalizeUiState(input: unknown): UiState {
     search: typeof record.search === "string" ? record.search : "",
     matcher: typeof record.matcher === "string" ? record.matcher : "",
     selectedViewId: typeof record.selectedViewId === "string" ? record.selectedViewId : "",
+    activity: normalizeActivityUiState(record.activity),
     collapsedTaskIds,
     scrollPositions: normalizeScrollPositions(record.scrollPositions),
     newProjectDraft: typeof record.newProjectDraft === "string" ? record.newProjectDraft : "",
     newTrackDraft: typeof record.newTrackDraft === "string" ? record.newTrackDraft : "",
     newTagDraft: typeof record.newTagDraft === "string" ? record.newTagDraft : ""
   };
+}
+
+function normalizeActivityUiState(input: unknown): ActivityUiState {
+  const record = isRecord(input) ? input : {};
+  const range = isActivityTimelineRange(record.range) ? record.range : DEFAULT_UI_STATE.activity.range;
+  const showEvents = typeof record.showEvents === "boolean" ? record.showEvents : DEFAULT_UI_STATE.activity.showEvents;
+  return {
+    matcher: typeof record.matcher === "string" ? record.matcher : "",
+    appliedMatcher: typeof record.appliedMatcher === "string" ? record.appliedMatcher : "",
+    range,
+    showEvents,
+    showRoutineEvents: showEvents && typeof record.showRoutineEvents === "boolean" ? record.showRoutineEvents : DEFAULT_UI_STATE.activity.showRoutineEvents
+  };
+}
+
+function isActivityTimelineRange(value: unknown): value is ActivityTimelineRange {
+  return value === "fit" || value === "6h" || value === "24h" || value === "7d" || value === "all";
 }
 
 function normalizeScrollPositions(input: unknown): Record<string, number> {
