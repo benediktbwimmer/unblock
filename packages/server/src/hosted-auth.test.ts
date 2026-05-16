@@ -2,6 +2,8 @@ import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   connectorEvent,
+  buildConnectorSyncQueueItem,
+  connectorSyncPolicyPreset,
   createMemoryStore,
   createServices,
   type AppStore,
@@ -9,6 +11,8 @@ import {
   type ConnectorCursorRecord,
   type ConnectorExternalMapping,
   type ConnectorRepository,
+  type ConnectorSyncPolicyRecord,
+  type ConnectorSyncQueueItem,
   type ConnectorSyncRun,
   type HostedSecret,
   type HostedSecretRepository,
@@ -281,6 +285,75 @@ describe("hosted authorization", () => {
     await expect(listed.json()).resolves.toMatchObject([{ externalId: "acme/repo#42", localId: "GH-42" }]);
   });
 
+  it("exposes connector sync policies and queue items", async () => {
+    const store = await seededStore();
+    installConnectorState(store);
+    const app = createApp({ backend: "hosted", storeFactory: () => store, hostedAuth });
+    const policy = connectorSyncPolicyPreset("github", "execution_layer");
+
+    const created = await app.request("/api/connectors/sync-policies", {
+      method: "POST",
+      headers: { ...hostedHeaders("connector_admin"), "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: "HOSTED",
+        id: "github-default",
+        connectionId: "github-main",
+        name: "GitHub default",
+        policy
+      })
+    });
+    expect(created.status).toBe(201);
+    await expect(created.json()).resolves.toMatchObject({
+      id: "github-default",
+      policy: { preset: "execution_layer" }
+    });
+
+    const queueItem = buildConnectorSyncQueueItem({
+      policy,
+      mapping: {
+        projectId: "HOSTED",
+        connectionId: "github-main",
+        provider: "github",
+        externalKind: "issue",
+        externalId: "acme/repo#42",
+        externalUrl: "https://github.com/acme/repo/issues/42",
+        externalVersion: "etag-1",
+        localKind: "task",
+        localId: "GH-42",
+        localVersion: "1",
+        syncDirection: "bidirectional",
+        conflictPolicy: "operator_review",
+        status: "active",
+        createdAt: "2026-05-16T00:00:00.000Z",
+        updatedAt: "2026-05-16T00:00:00.000Z",
+        archivedAt: null,
+        metadata: {}
+      },
+      diff: { field: "title", externalValue: "External", localValue: "Local" }
+    });
+    await store.connectors?.upsertSyncQueueItem?.(queueItem);
+
+    const listed = await app.request("/api/connectors/sync-queue?projectId=HOSTED&connectionId=github-main", {
+      headers: hostedHeaders("connector_admin")
+    });
+    expect(listed.status).toBe(200);
+    await expect(listed.json()).resolves.toMatchObject([
+      { id: queueItem.id, status: "pending", decision: { kind: "apply_inbound" } }
+    ]);
+
+    const resolved = await app.request(`/api/connectors/sync-queue/${queueItem.id}/status?projectId=HOSTED`, {
+      method: "POST",
+      headers: { ...hostedHeaders("connector_admin"), "content-type": "application/json" },
+      body: JSON.stringify({ status: "resolved", resolvedAt: "2026-05-16T00:00:01.000Z" })
+    });
+    expect(resolved.status).toBe(200);
+    await expect(resolved.json()).resolves.toMatchObject({
+      id: queueItem.id,
+      status: "resolved",
+      resolvedAt: "2026-05-16T00:00:01.000Z"
+    });
+  });
+
   it("accepts bulk GitHub mapping and connector inbox reconciliation writes", async () => {
     const store = await seededStore();
     installConnectorState(store);
@@ -519,6 +592,8 @@ class FakeConnectors implements ConnectorRepository {
   cursors: ConnectorCursorRecord[] = [];
   runs: ConnectorSyncRun[] = [];
   mappings: ConnectorExternalMapping[] = [];
+  policies: ConnectorSyncPolicyRecord[] = [];
+  queueItems: ConnectorSyncQueueItem[] = [];
 
   async upsertConnection(connection: ConnectorConnection) {
     const index = this.connections.findIndex((item) => item.projectId === connection.projectId && item.id === connection.id);
@@ -599,6 +674,56 @@ class FakeConnectors implements ConnectorRepository {
       .filter((mapping) => !options.connectionId || mapping.connectionId === options.connectionId)
       .filter((mapping) => !options.provider || mapping.provider === options.provider)
       .slice(0, options.limit ?? 100);
+  }
+
+  async upsertSyncPolicy(policy: ConnectorSyncPolicyRecord) {
+    const index = this.policies.findIndex((item) => item.projectId === policy.projectId && item.id === policy.id);
+    if (index >= 0) this.policies[index] = policy;
+    else this.policies.push(policy);
+  }
+
+  async getSyncPolicy(projectId: string, connectionId: string, id: string) {
+    return this.policies.find((policy) => policy.projectId === projectId && policy.connectionId === connectionId && policy.id === id) ?? null;
+  }
+
+  async listSyncPolicies(options: { projectId?: string | undefined; connectionId?: string | undefined; includeArchived?: boolean | undefined; limit?: number | undefined }) {
+    return this.policies
+      .filter((policy) => !options.projectId || policy.projectId === options.projectId)
+      .filter((policy) => !options.connectionId || policy.connectionId === options.connectionId)
+      .filter((policy) => options.includeArchived || !policy.archivedAt)
+      .slice(0, options.limit ?? 100);
+  }
+
+  async upsertSyncQueueItem(item: ConnectorSyncQueueItem) {
+    const index = this.queueItems.findIndex((candidate) => candidate.projectId === item.projectId && candidate.id === item.id);
+    if (index >= 0) this.queueItems[index] = item;
+    else this.queueItems.push(item);
+  }
+
+  async getSyncQueueItem(projectId: string, id: string) {
+    return this.queueItems.find((item) => item.projectId === projectId && item.id === id) ?? null;
+  }
+
+  async listSyncQueueItems(options: { projectId?: string | undefined; connectionId?: string | undefined; status?: ConnectorSyncQueueItem["status"] | undefined; limit?: number | undefined }) {
+    return this.queueItems
+      .filter((item) => !options.projectId || item.projectId === options.projectId)
+      .filter((item) => !options.connectionId || item.connectionId === options.connectionId)
+      .filter((item) => !options.status || item.status === options.status)
+      .slice(0, options.limit ?? 100);
+  }
+
+  async updateSyncQueueItemStatus(
+    projectId: string,
+    id: string,
+    status: ConnectorSyncQueueItem["status"],
+    options: { resolvedAt?: string | null | undefined; error?: Record<string, unknown> | null | undefined } = {}
+  ) {
+    const item = this.queueItems.find((candidate) => candidate.projectId === projectId && candidate.id === id);
+    if (!item) return null;
+    item.status = status;
+    item.resolvedAt = options.resolvedAt ?? null;
+    item.error = options.error ?? null;
+    return item;
   }
 }
 

@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   buildConnectorSyncQueueItem,
+  createConnectorSyncPolicyRecord,
   connectorSyncPolicyPreset,
   decideConnectorFieldSync,
+  listConnectorSyncPolicies,
+  listConnectorSyncQueueItems,
   mergeConnectorSyncPolicies,
+  updateConnectorSyncQueueItemStatus,
+  upsertConnectorSyncPolicy,
 } from "./connector-sync.js";
-import type { ConnectorExternalMapping } from "./types.js";
+import type { ConnectorExternalMapping, ConnectorSyncPolicyRecord, ConnectorSyncQueueItem } from "./types.js";
 
 describe("connector sync policy", () => {
   it("defaults to the execution layer preset", () => {
@@ -149,3 +154,133 @@ describe("connector sync queue items", () => {
     });
   });
 });
+
+describe("connector sync persistence helpers", () => {
+  it("creates policy records with stable defaults", () => {
+    const record = createConnectorSyncPolicyRecord({
+      projectId: "PROJECT",
+      id: "default",
+      connectionId: "github-main",
+      name: "Default",
+      policy: connectorSyncPolicyPreset("github", "execution_layer"),
+    }, "2026-05-16T00:00:00.000Z");
+
+    expect(record).toMatchObject({
+      id: "default",
+      scopeQuery: null,
+      priority: 0,
+      enabled: true,
+      createdAt: "2026-05-16T00:00:00.000Z",
+    });
+  });
+
+  it("uses connector repositories for policy and queue persistence", async () => {
+    const connectors = new FakeConnectors();
+    const store = { connectors } as any;
+    const policy = await upsertConnectorSyncPolicy(store, {
+      projectId: "PROJECT",
+      id: "default",
+      connectionId: "github-main",
+      name: "Default",
+      policy: connectorSyncPolicyPreset("github", "execution_layer"),
+    });
+    const queueItem = buildConnectorSyncQueueItem({
+      policy: policy.policy,
+      mapping: {
+        projectId: "PROJECT",
+        connectionId: "github-main",
+        provider: "github",
+        externalKind: "issue",
+        externalId: "acme/repo#1",
+        externalUrl: "https://github.com/acme/repo/issues/1",
+        externalVersion: "1",
+        localKind: "task",
+        localId: "GH-1",
+        localVersion: "1",
+        syncDirection: "bidirectional",
+        conflictPolicy: "operator_review",
+        status: "active",
+        createdAt: "2026-05-16T00:00:00.000Z",
+        updatedAt: "2026-05-16T00:00:00.000Z",
+        archivedAt: null,
+        metadata: {},
+      },
+      diff: {
+        field: "title",
+        externalValue: "External",
+        localValue: "Local",
+      },
+    });
+    await connectors.upsertSyncQueueItem(queueItem);
+
+    await expect(listConnectorSyncPolicies(store, { projectId: "PROJECT" }))
+      .resolves.toHaveLength(1);
+    await expect(listConnectorSyncQueueItems(store, { projectId: "PROJECT" }))
+      .resolves.toHaveLength(1);
+    await expect(updateConnectorSyncQueueItemStatus(store, {
+      projectId: "PROJECT",
+      id: queueItem.id,
+      status: "resolved",
+      resolvedAt: "2026-05-16T00:00:01.000Z",
+    })).resolves.toMatchObject({
+      status: "resolved",
+      resolvedAt: "2026-05-16T00:00:01.000Z",
+    });
+  });
+});
+
+class FakeConnectors {
+  policies: ConnectorSyncPolicyRecord[] = [];
+  queueItems: ConnectorSyncQueueItem[] = [];
+
+  async upsertSyncPolicy(policy: ConnectorSyncPolicyRecord) {
+    const index = this.policies.findIndex((item) =>
+      item.projectId === policy.projectId && item.id === policy.id
+    );
+    if (index >= 0) this.policies[index] = policy;
+    else this.policies.push(policy);
+  }
+
+  async getSyncPolicy(projectId: string, connectionId: string, id: string) {
+    return this.policies.find((policy) =>
+      policy.projectId === projectId &&
+      policy.connectionId === connectionId &&
+      policy.id === id
+    ) ?? null;
+  }
+
+  async listSyncPolicies(options: { projectId?: string }) {
+    return this.policies.filter((policy) =>
+      !options.projectId || policy.projectId === options.projectId
+    );
+  }
+
+  async upsertSyncQueueItem(item: ConnectorSyncQueueItem) {
+    const index = this.queueItems.findIndex((existing) =>
+      existing.projectId === item.projectId && existing.id === item.id
+    );
+    if (index >= 0) this.queueItems[index] = item;
+    else this.queueItems.push(item);
+  }
+
+  async listSyncQueueItems(options: { projectId?: string }) {
+    return this.queueItems.filter((item) =>
+      !options.projectId || item.projectId === options.projectId
+    );
+  }
+
+  async updateSyncQueueItemStatus(
+    projectId: string,
+    id: string,
+    status: ConnectorSyncQueueItem["status"],
+    options: { resolvedAt?: string | null },
+  ) {
+    const item = this.queueItems.find((candidate) =>
+      candidate.projectId === projectId && candidate.id === id
+    );
+    if (!item) return null;
+    item.status = status;
+    item.resolvedAt = options.resolvedAt ?? null;
+    return item;
+  }
+}

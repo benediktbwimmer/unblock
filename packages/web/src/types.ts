@@ -272,10 +272,79 @@ export interface GitHubConnectionRecord {
     privateKeySecretId: string;
     webhookSecretId: string;
     syncDirection: "github_to_unblock" | "unblock_to_github" | "bidirectional";
+    syncPreset?: ConnectorSyncPreset;
+    fieldPolicies?: Record<string, ConnectorFieldPolicy>;
     conflictPolicy: "github_wins" | "unblock_wins" | "last_writer_wins" | "operator_review";
     requiredPermissions: Record<string, string>;
     subscribeEvents: string[];
   };
+}
+
+export type ConnectorSyncPreset = "mirror_external_work" | "execution_layer" | "bidirectional_project_sync";
+export type ConnectorFieldSyncMode = "disabled" | "manual" | "inbound_only" | "outbound_only" | "bidirectional" | "append_only" | "unblock_owned" | "external_owned";
+export type ConnectorSyncQueueItemStatus = "pending" | "auto_applying" | "blocked" | "manual_review" | "ignored" | "resolved" | "failed";
+
+export interface ConnectorFieldPolicy {
+  field: string;
+  mode: ConnectorFieldSyncMode;
+  conflictPolicy?: "external_wins" | "unblock_wins" | "last_writer_wins" | "manual_review" | "blocked";
+  outboundAction?: string | null;
+  requiredExternalDefaults?: Record<string, unknown>;
+  notes?: string;
+}
+
+export interface ConnectorSyncPolicyRecord {
+  projectId: string;
+  id: string;
+  connectionId: string;
+  name: string;
+  scopeQuery: string | null;
+  priority: number;
+  enabled: boolean;
+  policy: {
+    preset: ConnectorSyncPreset;
+    provider: string;
+    objectKind: string;
+    fields: Record<string, ConnectorFieldPolicy>;
+  };
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+}
+
+export interface ConnectorSyncQueueItemRecord {
+  projectId: string;
+  id: string;
+  connectionId: string;
+  mappingId: string | null;
+  externalKind: string;
+  externalId: string;
+  localKind: string;
+  localId: string;
+  status: ConnectorSyncQueueItemStatus;
+  severity: "info" | "warning" | "error";
+  detectedAt: string;
+  resolvedAt: string | null;
+  decision: {
+    kind: "noop" | "apply_inbound" | "apply_outbound" | "manual_review" | "ignore" | "blocked";
+    field: string;
+    reason: string;
+    confidence: "high" | "medium" | "low";
+    proposedValue?: unknown;
+  };
+  externalSnapshot: Record<string, unknown>;
+  localSnapshot: Record<string, unknown>;
+  diff: {
+    field: string;
+    externalValue: unknown;
+    localValue: unknown;
+  };
+  policyRef: {
+    preset: ConnectorSyncPreset;
+    policyId: string | null;
+    scopeQuery: string | null;
+  };
+  error: Record<string, unknown> | null;
 }
 
 export interface DependencyCandidateState {

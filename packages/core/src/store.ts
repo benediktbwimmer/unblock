@@ -8,6 +8,9 @@ import type {
   ConnectorConnection,
   ConnectorCursorRecord,
   ConnectorExternalMapping,
+  ConnectorSyncPolicyRecord,
+  ConnectorSyncQueueItem,
+  ConnectorSyncQueueItemStatus,
   ConnectorSyncRun,
   Migration,
   Project,
@@ -222,6 +225,38 @@ export interface ConnectorRepository {
     provider?: string | undefined;
     limit?: number | undefined;
   }): Promise<ConnectorExternalMapping[]>;
+  upsertSyncPolicy?(policy: ConnectorSyncPolicyRecord): Promise<void>;
+  getSyncPolicy?(
+    projectId: string,
+    connectionId: string,
+    id: string
+  ): Promise<ConnectorSyncPolicyRecord | null>;
+  listSyncPolicies?(options: {
+    projectId?: string | undefined;
+    connectionId?: string | undefined;
+    includeArchived?: boolean | undefined;
+    limit?: number | undefined;
+  }): Promise<ConnectorSyncPolicyRecord[]>;
+  upsertSyncQueueItem?(item: ConnectorSyncQueueItem): Promise<void>;
+  getSyncQueueItem?(
+    projectId: string,
+    id: string
+  ): Promise<ConnectorSyncQueueItem | null>;
+  listSyncQueueItems?(options: {
+    projectId?: string | undefined;
+    connectionId?: string | undefined;
+    status?: ConnectorSyncQueueItemStatus | undefined;
+    limit?: number | undefined;
+  }): Promise<ConnectorSyncQueueItem[]>;
+  updateSyncQueueItemStatus?(
+    projectId: string,
+    id: string,
+    status: ConnectorSyncQueueItemStatus,
+    options?: {
+      resolvedAt?: string | null | undefined;
+      error?: Record<string, unknown> | null | undefined;
+    }
+  ): Promise<ConnectorSyncQueueItem | null>;
 }
 
 export interface MatcherQueryRepository {

@@ -7,6 +7,8 @@ import {
   createPostgresStore,
   createSqliteStore,
   createHostedSecret,
+  connectorSyncPolicyRecordInputSchema,
+  connectorSyncQueueItemStatusSchema,
   defaultUnblockConfigPath,
   formatExplain,
   applyConnectorInboxEvent,
@@ -19,6 +21,8 @@ import {
   githubIssueMappingInputSchema,
   listGitHubConnections,
   listGitHubIssueMappings,
+  listConnectorSyncPolicies,
+  listConnectorSyncQueueItems,
   matcherQueryGrammar,
   MigrationService,
   nowIso,
@@ -30,6 +34,8 @@ import {
   UnblockError,
   upsertGitHubIssueMapping,
   upsertGitHubConnection,
+  updateConnectorSyncQueueItemStatus,
+  upsertConnectorSyncPolicy,
   publicUnblockConfig,
   readUnblockConfig,
   resolveUnblockStorageConfig,
@@ -312,6 +318,54 @@ export function createApp(options: ServerOptions = {}) {
     const connectors = c.get("store").connectors;
     if (!connectors) throw new UnblockError("validation", "Connector repository is not available.");
     return c.json(await connectors.listCursors(projectId, connectionId));
+  });
+
+  app.get("/api/connectors/sync-policies", async (c) => {
+    await requireHosted(c);
+    const projectId = c.req.query("projectId")?.trim();
+    await authorizeHosted(c, projectId ?? null);
+    return c.json(await listConnectorSyncPolicies(c.get("store"), {
+      projectId,
+      connectionId: c.req.query("connectionId")?.trim(),
+      includeArchived: c.req.query("includeArchived") === "true",
+      limit: parseOptionalInteger(c.req.query("limit")) ?? 100
+    }));
+  });
+
+  app.post("/api/connectors/sync-policies", async (c) => {
+    await requireHosted(c);
+    const body = connectorSyncPolicyRecordInputSchema.parse(await c.req.json());
+    await authorizeHosted(c, body.projectId);
+    return c.json(await upsertConnectorSyncPolicy(c.get("store"), body), 201);
+  });
+
+  app.get("/api/connectors/sync-queue", async (c) => {
+    await requireHosted(c);
+    const projectId = c.req.query("projectId")?.trim();
+    await authorizeHosted(c, projectId ?? null);
+    const statusQuery = c.req.query("status")?.trim();
+    const status = statusQuery ? connectorSyncQueueItemStatusSchema.parse(statusQuery) : undefined;
+    return c.json(await listConnectorSyncQueueItems(c.get("store"), {
+      projectId,
+      connectionId: c.req.query("connectionId")?.trim(),
+      status,
+      limit: parseOptionalInteger(c.req.query("limit")) ?? 100
+    }));
+  });
+
+  app.post("/api/connectors/sync-queue/:id/status", async (c) => {
+    await requireHosted(c);
+    const projectId = requireProjectId(c);
+    await authorizeHosted(c, projectId);
+    const body = await c.req.json<{ status?: string; resolvedAt?: string | null; error?: Record<string, unknown> | null }>();
+    const status = connectorSyncQueueItemStatusSchema.parse(body.status);
+    return c.json(await updateConnectorSyncQueueItemStatus(c.get("store"), {
+      projectId,
+      id: c.req.param("id"),
+      status,
+      resolvedAt: body.resolvedAt,
+      error: body.error
+    }));
   });
 
   app.post("/api/connectors/reconcile", async (c) => {

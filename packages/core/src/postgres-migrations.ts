@@ -502,5 +502,69 @@ export const postgresMigrations: StoreMigration[] = [
       create index if not exists connector_external_mappings_status_idx
         on connector_external_mappings(tenant_id, project_id, provider, status, updated_at desc);
     `
+  },
+  {
+    id: "pg0006",
+    name: "hosted connector sync policies and queue",
+    sql: `
+      create table if not exists connector_sync_policies (
+        tenant_id text not null,
+        project_id text not null,
+        id text not null,
+        connection_id text not null,
+        name text not null,
+        scope_query text null,
+        priority integer not null default 0,
+        enabled boolean not null default true,
+        policy_json jsonb not null,
+        created_at timestamptz not null,
+        updated_at timestamptz not null,
+        archived_at timestamptz null,
+        primary key (tenant_id, project_id, id),
+        foreign key (tenant_id, project_id, connection_id)
+          references connector_connections(tenant_id, project_id, id) on delete cascade
+      );
+
+      create index if not exists connector_sync_policies_connection_idx
+        on connector_sync_policies(tenant_id, project_id, connection_id, enabled, priority desc, updated_at desc)
+        where archived_at is null;
+      create index if not exists connector_sync_policies_scope_idx
+        on connector_sync_policies(tenant_id, project_id, connection_id, scope_query)
+        where archived_at is null and scope_query is not null;
+
+      create table if not exists sync_queue_items (
+        tenant_id text not null,
+        project_id text not null,
+        id text not null,
+        connection_id text not null,
+        mapping_id text null,
+        external_kind text not null,
+        external_id text not null,
+        local_kind text not null,
+        local_id text not null,
+        status text not null check (status in ('pending', 'auto_applying', 'blocked', 'manual_review', 'ignored', 'resolved', 'failed')),
+        severity text not null check (severity in ('info', 'warning', 'error')),
+        detected_at timestamptz not null,
+        resolved_at timestamptz null,
+        decision_json jsonb not null,
+        external_snapshot_json jsonb not null default '{}'::jsonb,
+        local_snapshot_json jsonb not null default '{}'::jsonb,
+        diff_json jsonb not null,
+        policy_ref_json jsonb not null,
+        error_json jsonb null,
+        primary key (tenant_id, project_id, id),
+        foreign key (tenant_id, project_id, connection_id)
+          references connector_connections(tenant_id, project_id, id) on delete cascade
+      );
+
+      create index if not exists sync_queue_items_connection_status_idx
+        on sync_queue_items(tenant_id, project_id, connection_id, status, detected_at desc);
+      create index if not exists sync_queue_items_status_idx
+        on sync_queue_items(tenant_id, project_id, status, severity, detected_at desc);
+      create index if not exists sync_queue_items_external_idx
+        on sync_queue_items(tenant_id, project_id, connection_id, external_kind, external_id, detected_at desc);
+      create index if not exists sync_queue_items_local_idx
+        on sync_queue_items(tenant_id, project_id, local_kind, local_id, detected_at desc);
+    `
   }
 ];

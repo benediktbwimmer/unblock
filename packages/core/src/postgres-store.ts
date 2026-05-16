@@ -33,6 +33,9 @@ import type {
   ConnectorConnection,
   ConnectorCursorRecord,
   ConnectorExternalMapping,
+  ConnectorSyncPolicyRecord,
+  ConnectorSyncQueueItem,
+  ConnectorSyncQueueItemStatus,
   ConnectorSyncRun,
   Dependency,
   HostedAuditEvent,
@@ -836,6 +839,190 @@ class PostgresConnectorRepository implements ConnectorRepository {
       params,
     );
     return result.rows.map(connectorExternalMappingFromRow);
+  }
+
+  async upsertSyncPolicy(policy: ConnectorSyncPolicyRecord): Promise<void> {
+    await this.db.query(
+      `
+      insert into connector_sync_policies (
+        tenant_id, project_id, id, connection_id, name, scope_query, priority,
+        enabled, policy_json, created_at, updated_at, archived_at
+      ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12)
+      on conflict (tenant_id, project_id, id) do update set
+        connection_id = excluded.connection_id,
+        name = excluded.name,
+        scope_query = excluded.scope_query,
+        priority = excluded.priority,
+        enabled = excluded.enabled,
+        policy_json = excluded.policy_json,
+        updated_at = excluded.updated_at,
+        archived_at = excluded.archived_at
+    `,
+      connectorSyncPolicyParams(this.tenantId, policy),
+    );
+  }
+
+  async getSyncPolicy(
+    projectId: string,
+    connectionId: string,
+    id: string,
+  ): Promise<ConnectorSyncPolicyRecord | null> {
+    const result = await this.db.query(
+      `
+      select * from connector_sync_policies
+      where tenant_id = $1 and project_id = $2 and connection_id = $3 and id = $4
+    `,
+      [this.tenantId, projectId, connectionId, id],
+    );
+    return result.rows[0] ? connectorSyncPolicyFromRow(result.rows[0]) : null;
+  }
+
+  async listSyncPolicies(
+    options: {
+      projectId?: string | undefined;
+      connectionId?: string | undefined;
+      includeArchived?: boolean | undefined;
+      limit?: number | undefined;
+    },
+  ): Promise<ConnectorSyncPolicyRecord[]> {
+    const limit = Math.min(Math.max(options.limit ?? 100, 1), 1000);
+    const clauses = ["tenant_id = $1"];
+    const params: unknown[] = [this.tenantId];
+    if (options.projectId) {
+      params.push(options.projectId);
+      clauses.push(`project_id = $${params.length}`);
+    }
+    if (options.connectionId) {
+      params.push(options.connectionId);
+      clauses.push(`connection_id = $${params.length}`);
+    }
+    if (!options.includeArchived) {
+      clauses.push("archived_at is null");
+    }
+    params.push(limit);
+    const result = await this.db.query(
+      `
+      select * from connector_sync_policies
+      where ${clauses.join(" and ")}
+      order by priority desc, updated_at desc, id asc
+      limit $${params.length}
+    `,
+      params,
+    );
+    return result.rows.map(connectorSyncPolicyFromRow);
+  }
+
+  async upsertSyncQueueItem(item: ConnectorSyncQueueItem): Promise<void> {
+    await this.db.query(
+      `
+      insert into sync_queue_items (
+        tenant_id, project_id, id, connection_id, mapping_id, external_kind,
+        external_id, local_kind, local_id, status, severity, detected_at,
+        resolved_at, decision_json, external_snapshot_json, local_snapshot_json,
+        diff_json, policy_ref_json, error_json
+      ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16::jsonb, $17::jsonb, $18::jsonb, $19::jsonb)
+      on conflict (tenant_id, project_id, id) do update set
+        connection_id = excluded.connection_id,
+        mapping_id = excluded.mapping_id,
+        external_kind = excluded.external_kind,
+        external_id = excluded.external_id,
+        local_kind = excluded.local_kind,
+        local_id = excluded.local_id,
+        status = excluded.status,
+        severity = excluded.severity,
+        resolved_at = excluded.resolved_at,
+        decision_json = excluded.decision_json,
+        external_snapshot_json = excluded.external_snapshot_json,
+        local_snapshot_json = excluded.local_snapshot_json,
+        diff_json = excluded.diff_json,
+        policy_ref_json = excluded.policy_ref_json,
+        error_json = excluded.error_json
+    `,
+      connectorSyncQueueItemParams(this.tenantId, item),
+    );
+  }
+
+  async getSyncQueueItem(
+    projectId: string,
+    id: string,
+  ): Promise<ConnectorSyncQueueItem | null> {
+    const result = await this.db.query(
+      `
+      select * from sync_queue_items
+      where tenant_id = $1 and project_id = $2 and id = $3
+    `,
+      [this.tenantId, projectId, id],
+    );
+    return result.rows[0] ? connectorSyncQueueItemFromRow(result.rows[0]) : null;
+  }
+
+  async listSyncQueueItems(
+    options: {
+      projectId?: string | undefined;
+      connectionId?: string | undefined;
+      status?: ConnectorSyncQueueItemStatus | undefined;
+      limit?: number | undefined;
+    },
+  ): Promise<ConnectorSyncQueueItem[]> {
+    const limit = Math.min(Math.max(options.limit ?? 100, 1), 1000);
+    const clauses = ["tenant_id = $1"];
+    const params: unknown[] = [this.tenantId];
+    if (options.projectId) {
+      params.push(options.projectId);
+      clauses.push(`project_id = $${params.length}`);
+    }
+    if (options.connectionId) {
+      params.push(options.connectionId);
+      clauses.push(`connection_id = $${params.length}`);
+    }
+    if (options.status) {
+      params.push(options.status);
+      clauses.push(`status = $${params.length}`);
+    }
+    params.push(limit);
+    const result = await this.db.query(
+      `
+      select * from sync_queue_items
+      where ${clauses.join(" and ")}
+      order by detected_at desc, id asc
+      limit $${params.length}
+    `,
+      params,
+    );
+    return result.rows.map(connectorSyncQueueItemFromRow);
+  }
+
+  async updateSyncQueueItemStatus(
+    projectId: string,
+    id: string,
+    status: ConnectorSyncQueueItemStatus,
+    options: {
+      resolvedAt?: string | null | undefined;
+      error?: Record<string, unknown> | null | undefined;
+    } = {},
+  ): Promise<ConnectorSyncQueueItem | null> {
+    const resolvedAt = options.resolvedAt === undefined
+      ? (status === "resolved" || status === "ignored" ? nowIso() : null)
+      : options.resolvedAt;
+    const result = await this.db.query(
+      `
+      update sync_queue_items
+      set status = $4,
+        resolved_at = $5,
+        error_json = $6::jsonb
+      where tenant_id = $1 and project_id = $2 and id = $3
+      returning *
+    `,
+      [
+        this.tenantId,
+        projectId,
+        id,
+        status,
+        resolvedAt,
+        options.error === undefined ? null : JSON.stringify(options.error),
+      ],
+    );
+    return result.rows[0] ? connectorSyncQueueItemFromRow(result.rows[0]) : null;
   }
 }
 
@@ -2760,6 +2947,94 @@ function connectorExternalMappingFromRow(row: any): ConnectorExternalMapping {
     updatedAt: iso(row.updated_at),
     archivedAt: nullableIso(row.archived_at),
     metadata: jsonRecord(row.metadata_json),
+  };
+}
+
+function connectorSyncPolicyParams(
+  tenantId: string,
+  policy: ConnectorSyncPolicyRecord,
+): unknown[] {
+  return [
+    tenantId,
+    policy.projectId,
+    policy.id,
+    policy.connectionId,
+    policy.name,
+    policy.scopeQuery,
+    policy.priority,
+    policy.enabled,
+    JSON.stringify(policy.policy),
+    policy.createdAt,
+    policy.updatedAt,
+    policy.archivedAt,
+  ];
+}
+
+function connectorSyncPolicyFromRow(row: any): ConnectorSyncPolicyRecord {
+  return {
+    projectId: row.project_id,
+    id: row.id,
+    connectionId: row.connection_id,
+    name: row.name,
+    scopeQuery: row.scope_query,
+    priority: row.priority,
+    enabled: row.enabled === true,
+    policy: jsonRecord(row.policy_json) as unknown as ConnectorSyncPolicyRecord["policy"],
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+    archivedAt: nullableIso(row.archived_at),
+  };
+}
+
+function connectorSyncQueueItemParams(
+  tenantId: string,
+  item: ConnectorSyncQueueItem,
+): unknown[] {
+  return [
+    tenantId,
+    item.projectId,
+    item.id,
+    item.connectionId,
+    item.mappingId,
+    item.externalKind,
+    item.externalId,
+    item.localKind,
+    item.localId,
+    item.status,
+    item.severity,
+    item.detectedAt,
+    item.resolvedAt,
+    JSON.stringify(item.decision),
+    JSON.stringify(item.externalSnapshot),
+    JSON.stringify(item.localSnapshot),
+    JSON.stringify(item.diff),
+    JSON.stringify(item.policyRef),
+    item.error === null ? null : JSON.stringify(item.error),
+  ];
+}
+
+function connectorSyncQueueItemFromRow(row: any): ConnectorSyncQueueItem {
+  return {
+    projectId: row.project_id,
+    id: row.id,
+    connectionId: row.connection_id,
+    mappingId: row.mapping_id,
+    externalKind: row.external_kind,
+    externalId: row.external_id,
+    localKind: row.local_kind,
+    localId: row.local_id,
+    status: row.status,
+    severity: row.severity,
+    detectedAt: iso(row.detected_at),
+    resolvedAt: nullableIso(row.resolved_at),
+    decision: jsonRecord(row.decision_json) as unknown as ConnectorSyncQueueItem["decision"],
+    externalSnapshot: jsonRecord(row.external_snapshot_json),
+    localSnapshot: jsonRecord(row.local_snapshot_json),
+    diff: jsonRecord(row.diff_json) as unknown as ConnectorSyncQueueItem["diff"],
+    policyRef: jsonRecord(row.policy_ref_json) as unknown as ConnectorSyncQueueItem["policyRef"],
+    error: row.error_json === null || row.error_json === undefined
+      ? null
+      : jsonRecord(row.error_json),
   };
 }
 

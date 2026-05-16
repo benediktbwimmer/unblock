@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { validation } from "./errors.js";
+import type { AppStore, ConnectorRepository } from "./store.js";
 import {
   nowIso,
   type ConnectorExternalMapping,
@@ -9,8 +11,10 @@ import {
   type ConnectorFieldSyncMode,
   type ConnectorSyncDecision,
   type ConnectorSyncPolicy,
+  type ConnectorSyncPolicyRecord,
   type ConnectorSyncPreset,
   type ConnectorSyncQueueItem,
+  type ConnectorSyncQueueItemStatus,
 } from "./types.js";
 
 export const connectorSyncPresetSchema = z.enum([
@@ -59,6 +63,30 @@ export const connectorSyncPolicySchema: z.ZodType<ConnectorSyncPolicy> = z.objec
   fields: connectorFieldPolicyRecordSchema,
 });
 
+export const connectorSyncPolicyRecordInputSchema = z.object({
+  projectId: z.string().min(1),
+  id: z.string().min(1).optional(),
+  connectionId: z.string().min(1),
+  name: z.string().min(1),
+  scopeQuery: z.string().min(1).nullable().optional(),
+  priority: z.number().int().default(0),
+  enabled: z.boolean().default(true),
+  policy: connectorSyncPolicySchema,
+});
+export type ConnectorSyncPolicyRecordInput = z.infer<
+  typeof connectorSyncPolicyRecordInputSchema
+>;
+
+export const connectorSyncQueueItemStatusSchema = z.enum([
+  "pending",
+  "auto_applying",
+  "blocked",
+  "manual_review",
+  "ignored",
+  "resolved",
+  "failed",
+]);
+
 export interface ConnectorSyncDecisionInput {
   diff: ConnectorFieldDiff;
   policy: ConnectorSyncPolicy;
@@ -68,6 +96,99 @@ export interface ConnectorSyncDecisionInput {
   localSnapshot?: Record<string, unknown> | undefined;
   mapping?: ConnectorExternalMapping | null | undefined;
   now?: string | undefined;
+}
+
+export function createConnectorSyncPolicyRecord(
+  input: ConnectorSyncPolicyRecordInput,
+  now = nowIso(),
+): ConnectorSyncPolicyRecord {
+  const parsed = connectorSyncPolicyRecordInputSchema.parse(input);
+  return {
+    projectId: parsed.projectId,
+    id: parsed.id ?? randomUUID(),
+    connectionId: parsed.connectionId,
+    name: parsed.name,
+    scopeQuery: parsed.scopeQuery ?? null,
+    priority: parsed.priority,
+    enabled: parsed.enabled,
+    policy: parsed.policy,
+    createdAt: now,
+    updatedAt: now,
+    archivedAt: null,
+  };
+}
+
+export async function upsertConnectorSyncPolicy(
+  store: AppStore,
+  input: ConnectorSyncPolicyRecordInput,
+): Promise<ConnectorSyncPolicyRecord> {
+  const connectors = requireConnectorSyncPolicyRepository(store.connectors);
+  const now = nowIso();
+  const existing = input.id
+    ? await connectors.getSyncPolicy(input.projectId, input.connectionId, input.id)
+    : null;
+  const record = {
+    ...createConnectorSyncPolicyRecord(input, now),
+    createdAt: existing?.createdAt ?? now,
+    archivedAt: existing?.archivedAt ?? null,
+  };
+  await connectors.upsertSyncPolicy(record);
+  return record;
+}
+
+export async function listConnectorSyncPolicies(
+  store: AppStore,
+  options: {
+    projectId?: string | undefined;
+    connectionId?: string | undefined;
+    includeArchived?: boolean | undefined;
+    limit?: number | undefined;
+  },
+): Promise<ConnectorSyncPolicyRecord[]> {
+  const connectors = requireConnectorSyncPolicyRepository(store.connectors);
+  return connectors.listSyncPolicies(options);
+}
+
+export async function listConnectorSyncQueueItems(
+  store: AppStore,
+  options: {
+    projectId?: string | undefined;
+    connectionId?: string | undefined;
+    status?: ConnectorSyncQueueItemStatus | undefined;
+    limit?: number | undefined;
+  },
+): Promise<ConnectorSyncQueueItem[]> {
+  const connectors = requireConnectorSyncQueueRepository(store.connectors);
+  return connectors.listSyncQueueItems(options);
+}
+
+export async function updateConnectorSyncQueueItemStatus(
+  store: AppStore,
+  input: {
+    projectId: string;
+    id: string;
+    status: ConnectorSyncQueueItemStatus;
+    resolvedAt?: string | null | undefined;
+    error?: Record<string, unknown> | null | undefined;
+  },
+): Promise<ConnectorSyncQueueItem> {
+  const connectors = requireConnectorSyncQueueRepository(store.connectors);
+  const item = await connectors.updateSyncQueueItemStatus(
+    input.projectId,
+    input.id,
+    input.status,
+    {
+      resolvedAt: input.resolvedAt,
+      error: input.error,
+    },
+  );
+  if (!item) {
+    validation("Connector sync queue item not found.", {
+      projectId: input.projectId,
+      id: input.id,
+    });
+  }
+  return item;
 }
 
 export function connectorSyncPolicyPreset(
@@ -285,4 +406,49 @@ function decision(
     diff,
     ...(proposedValue !== undefined ? { proposedValue } : {}),
   };
+}
+
+function requireConnectorSyncPolicyRepository(
+  connectors: ConnectorRepository | undefined,
+): Required<
+  Pick<
+    ConnectorRepository,
+    "upsertSyncPolicy" | "getSyncPolicy" | "listSyncPolicies"
+  >
+> {
+  if (
+    !connectors?.upsertSyncPolicy || !connectors.getSyncPolicy ||
+    !connectors.listSyncPolicies
+  ) {
+    validation(
+      "Connector sync policies require a store with connector sync policy support.",
+    );
+  }
+  return connectors as Required<
+    Pick<
+      ConnectorRepository,
+      "upsertSyncPolicy" | "getSyncPolicy" | "listSyncPolicies"
+    >
+  >;
+}
+
+function requireConnectorSyncQueueRepository(
+  connectors: ConnectorRepository | undefined,
+): Required<
+  Pick<
+    ConnectorRepository,
+    "listSyncQueueItems" | "updateSyncQueueItemStatus"
+  >
+> {
+  if (!connectors?.listSyncQueueItems || !connectors.updateSyncQueueItemStatus) {
+    validation(
+      "Connector sync queue requires a store with connector sync queue support.",
+    );
+  }
+  return connectors as Required<
+    Pick<
+      ConnectorRepository,
+      "listSyncQueueItems" | "updateSyncQueueItemStatus"
+    >
+  >;
 }
